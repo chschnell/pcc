@@ -32,7 +32,7 @@ or as a package:
       -v          generate verbose output
       -d          add debug output to error messages
 
-`pipcc.py` is a tool to compile, upload and execute a C program in pigpiod's VM:
+`pipcc.py` is a tool to compile, upload and execute a C program into pigpiod's VM:
 
     > python pipcc.py -h
     usage: pipcc.py [-h] [-t TIMEOUT] [-p PARAMETER] [-s] [-i HOSTNAME] [-o PORT] [-a] [-v] FILE [FILE ...]
@@ -157,4 +157,4 @@ Currently, `NOTL`, `ANDL`, `ORL`, `EQ`, `NE`, `GT`, `GE`, `LT`, `LE` and `NEG` a
 
 This work-around suffices to streamline the implementation of the 37 C99 operators listed above but has some disadvantages, it creates complexity in the compiler and reduces the amount of TAGs available to the program, and also causes a slight amount of clutter and redundant code in the produced assembly output.
 
-The proposed additional assembly language commands above introduce simple, isolated additions to the VM's back-end code and are fully backwards-compatible.
+The proposed additional assembly language commands above introduce simple, isolated additions to the VM's back-end code, are fully backwards-compatible and would improve pcc considerably.
