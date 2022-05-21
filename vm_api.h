@@ -8,6 +8,12 @@
  */
 
 enum {
+    /* stdbool.h */
+    false = 0,
+    true  = 1,
+};
+
+enum {
     /* Error Codes */
     PI_INIT_FAILED       = -1,   // gpioInitialise failed
     PI_BAD_USER_GPIO     = -2,   // GPIO not 0-31

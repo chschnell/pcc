@@ -7,7 +7,6 @@
 import sys, os, argparse, re, collections
 from pathlib import PurePath, Path
 
-sys.path.extend(['pycparser'])
 from pycparser import c_ast
 from pycparser.c_parser import CParser
 from pycparser.plyparser import ParseError
@@ -133,7 +132,7 @@ class AsmVar:
 
     def __str__(self):
         if self.vm_var_id is None:
-            raise Exception('internal error: AsmVar.vm_var_id is not initialized!')
+            raise Exception('internal error: unbound virtual variable!')
         return self.vm_var_id
 
 class AsmStatement:
@@ -156,7 +155,7 @@ class AsmTag(AsmStatement):
 
     def __str__(self):
         if self.vm_tag_id is None:
-            raise Exception('internal error: AsmTag.vm_tag_id is not initialized!')
+            raise Exception('internal error: unbound virtual tag!')
         return self.vm_tag_id
 
 class AsmCmd(AsmStatement):
@@ -1099,8 +1098,7 @@ def main():
     else:
         with open(out_filename, 'w') as f:
             cc.encode_asm(use_comments=args.comments, file=f)
-    print('\nVM variables used: %d/150, tags: %d/50.' % (
-        cc.var_count, cc.tag_count), file=sys.stderr)
+    print('\nVM variables used: %d/150, tags: %d/50.' % (cc.var_count, cc.tag_count), file=sys.stderr)
     return 0
 
 if __name__ == "__main__":
