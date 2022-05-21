@@ -10,7 +10,7 @@ Requires Python package **[pycparser](https://github.com/eliben/pycparser)**:
 
 ## Usage
 
-`pcc.py` compiler command line arguments:
+**`pcc.py`** compiler command line arguments:
 
     > python pcc.py -h
     usage: pcc.py [-h] [-o FILE] [-c] [-n] [-v] [-d] C_FILE [C_FILE ...]
@@ -28,7 +28,7 @@ Requires Python package **[pycparser](https://github.com/eliben/pycparser)**:
       -v          generate verbose output
       -d          add debug output to error messages
 
-`pipcc.py` is a tool to compile, upload and execute a C program into pigpiod's VM:
+**`pipcc.py`** is a tool to compile, upload and execute a C program into pigpiod's VM:
 
     > python pipcc.py -h
     usage: pipcc.py [-h] [-t TIMEOUT] [-p PARAMETER] [-s] [-i HOSTNAME] [-o PORT] [-a] [-v] FILE [FILE ...]
