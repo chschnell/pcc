@@ -227,21 +227,20 @@ class AsmBuffer:
             out_buf.append(curr_stmt)
         self.stmt_buf = out_buf
 
-    def drop_unused_tags(self, tags):
+    def drop_unused_tags(self, tag_use_count):
         for asm_stmt in self.stmt_buf:
-            if isinstance(asm_stmt, AsmTag) and asm_stmt not in tags:
-                tags[asm_stmt] = 0
+            if isinstance(asm_stmt, AsmTag) and asm_stmt not in tag_use_count:
+                tag_use_count[asm_stmt] = 0
             elif isinstance(asm_stmt, AsmCmd) and asm_stmt.is_branch_cmd:
-                for arg in asm_stmt.args:
-                    if isinstance(arg, AsmTag):
-                        if arg not in tags:
-                            tags[arg] = 1
-                        else:
-                            tags[arg] += 1
+                asm_tag = asm_stmt.args[0]
+                if asm_tag not in tag_use_count:
+                    tag_use_count[asm_tag] = 1
+                else:
+                    tag_use_count[asm_tag] += 1
         out_buf = []
         for asm_stmt in self.stmt_buf:
-            if isinstance(asm_stmt, AsmTag) and tags[asm_stmt] == 0:
-                continue
+            if isinstance(asm_stmt, AsmTag) and tag_use_count[asm_stmt] == 0:
+                continue    ## drop TAG-commands of tags that are not used in any branch-command
             out_buf.append(asm_stmt)
         self.stmt_buf = out_buf
 
@@ -345,32 +344,32 @@ class UserFunctionSymbol(FunctionSymbol):
 
 class HelperFunction:
     def __init__(self, func_name):
-        self.func_name = func_name  ## str, internal helper function name
-        self.asm_tag = AsmTag()     ## AsmTag, function entry point's TAG
-        self.asm_out = AsmBuffer()  ## AsmBuffer, function implementation's statement buffer
+        self.func_name = func_name      ## str, internal helper function name
+        self.asm_tag = AsmTag()         ## AsmTag, function entry point's TAG
+        self.asm_out = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
 
 ## ---------------------------------------------------------------------------
 
 class Pcc:
     def __init__(self, c_files, debug):
-        self.c_source_files = c_files       ## dict(str filename: list(str c_src_line))
+        self.c_source_files = c_files       ## dict(str filename: list(str c_src_line)), unmodified C sources for error reports
         self.debug = debug                  ## bool, True: show extra debug output
+        self.error_count = 0                ## int, error counter
         self.var_count = None               ## int, number of VM variables allocated
         self.tag_count = None               ## int, number of VM tags allocated
         self.asm_out = AsmBuffer()          ## AsmBuffer, current output buffer, initialized with init seg
+        self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
         self.context_func_sym = None        ## None or UserFunctionSymbol, current function context
-        self.scope = collections.ChainMap() ## ChainMap, active scope with chained parents
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
-        self.loop_continue_tag = None       ## None or AsmTag, tag to JMP to in case of a "continue" statement
-        self.loop_break_tag = None          ## None or AsmTag, tag to JMP to in case of a "break" statement
-        self.declared_user_func = set()     ## set(UserFunctionSymbol), all declared functions
-        self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func)
-        self.error_count = 0                ## int, error counter
+        self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
+        self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
+        self.declared_user_func = set()     ## set(UserFunctionSymbol func_sym), all declared user functions
+        self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
         self.log_error_location = None      ## most recent reported error location
         self.all_buffers = None             ## list(AsmBuf asm_buf, ...), list of all buffers
 
     def compile(self, root_node, do_reduce=True):
-        user_functions = []         ## list(UserFunctionSymbol func)
+        user_functions = []                 ## list(UserFunctionSymbol func)
         ## compile global declarations and user functions
         for node in root_node:
             try:
