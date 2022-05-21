@@ -1,4 +1,4 @@
-# pcc - PIGS C compiler
+# pcc - C compiler for pigpio's PIGS VM
 
 A tiny C compiler for [pigpio](https://abyz.me.uk/rpi/pigpio/)'s PIGS VM written in pure Python3.
 
