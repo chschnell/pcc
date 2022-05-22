@@ -10,7 +10,9 @@ Requires Python package **[pycparser](https://github.com/eliben/pycparser)**:
 
 ## Usage
 
-**`pcc.py`** compiler command line arguments:
+### pcc.py
+
+Compiler command line arguments:
 
     > python pcc.py -h
     usage: pcc.py [-h] [-o FILE] [-c] [-n] [-v] [-d] C_FILE [C_FILE ...]
@@ -28,7 +30,21 @@ Requires Python package **[pycparser](https://github.com/eliben/pycparser)**:
       -v          generate verbose output
       -d          add debug output to error messages
 
-**`pipcc.py`** is a tool to compile, upload and execute a C program into pigpiod's VM:
+Specify one or more `*.c` input files on the command line. The output filename defaults to the last `*.c` filename with extension `*.s` in the current working directory. Use command line argument `-o-` to write output to STDOUT.
+
+Input files are parsed separately and merged into a single compilation unit before compiling the assembly output, symbols declared in one input file are thus visible to subsequent input files. Header file `vm_api.h` is implicitly included (parsed first before any of the given input files) unless it is explicitly stated as an input file.
+
+Examples:
+
+    # compile foo.c into foo.s
+    python pcc.py foo.c
+
+    # compile foo.c to STDOUT and add comments to the assembly output
+    python pcc.py -c -o- foo.c
+
+### pipcc.py
+
+Tool to compile, upload and execute a C program into a local or remote pigpiod VM. Command line arguments:
 
     > python pipcc.py -h
     usage: pipcc.py [-h] [-t TIMEOUT] [-p PARAMETER] [-s] [-i HOSTNAME] [-o PORT] [-a] [-v] FILE [FILE ...]
@@ -48,9 +64,11 @@ Requires Python package **[pycparser](https://github.com/eliben/pycparser)**:
       -a            treat input as assembly language file
       -v            generate verbose output
 
+This tool first uses `pcc.py` to compile one or more `*.c` input files and then uses pigpio's Python interface to upload and run the compiled assembly code on a pigpiod instance. If no pigpio hostname is specified the local pigpiod instance is connected. If a TIMEOUT value is specified the program is stopped in case it does not `HALT` by itself within this limit.
+
 To execute the test suite on a Raspberry Pi:
 
-    python pipcc.py -i <PI_HOSTNAME_OR_ADDR> -s tests/pcc_tests.conf
+    python pipcc.py -s tests/pcc_tests.conf
 
 ## Operators
 
@@ -71,12 +89,12 @@ Unsupported C99 operators:
 
 Supported C99 statements:
 
-- `if`, `else`, `for`, `while`, `do`, `break`, `continue` and `return`
+- `if`, `else`, `for`, `while`, `do`, `break`, `continue`, `label`, `goto` and `return`
 - compound `{ ... }` and expression statements
 
 Unsupported C99 statements:
 
-- `label`, `goto`, `switch`, `case`
+- `switch`, `case`
 
 ## Declarations
 
@@ -122,7 +140,7 @@ The C compiler supports decimal, octal or hexadecimal notation (e.g. `123`, `077
 ## Limitations
 
 * No C preprocessor, only simple support for C-style comments `//` and `/* ... */` (keep it simple, not all corner-cases are covered). That means anything starting with a hash (`#`) is not supported (e.g. `#include`, `#define`, ...).
-* The VM's limits of 150 variables and 50 labels limit the supported number of variables and control flow statements available to the program. The number of used variables and labels is printed to STDERR after compilation, however exceeding those limits does not lead to a compiler error.
+* The VM's limits of 150 variables and 50 tags limit the supported number of variables and control flow statements available to the program. The number of used variables and tags is printed to STDERR after compilation, however exceeding those limits does not lead to a compiler error.
 * The current function call model does not support recursion. Functions can call each other, but without direct or indirect recursion.
 * No type model (only `int`).
 

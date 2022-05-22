@@ -309,6 +309,16 @@ class VmParameterSymbol(VariableSymbol):
     def asm_repr(self):                 ## str vm_param_id, VM parameter name ("pN")
         return self.vm_param_id
 
+class LabelSymbol(AbstractSymbol):
+    def __init__(self, cname, decl_node, is_defined):
+        super().__init__(cname)
+        self.asm_tag = AsmTag()
+        self.is_defined = is_defined    ## bool, labels can be used with GOTO before they are defined
+        self.decl_node = decl_node      ## c_ast.Label or c_ast.Goto, AST node where this label was declared first
+
+    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to label's TAG
+        return self.asm_tag
+
 class FunctionSymbol(AbstractSymbol):
     def __init__(self, cname, has_return, arg_count):
         super().__init__(cname)
@@ -329,6 +339,7 @@ class UserFunctionSymbol(FunctionSymbol):
         self.decl_node = decl_node      ## c_ast.Decl, first declaration's node
         self.arg_names = []             ## list(str), argument names from implementation's declaration
         self.has_caller = False         ## bool, True: function has at least one caller
+        self.root_scope = None          ## ChainMap, function's root scope
         self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
         self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
         self.asm_out = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
@@ -345,8 +356,8 @@ class UserFunctionSymbol(FunctionSymbol):
 class HelperFunction:
     def __init__(self, func_name):
         self.func_name = func_name      ## str, internal helper function name
-        self.asm_tag = AsmTag()         ## AsmTag, function entry point's TAG
-        self.asm_out = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
+        self.asm_tag = AsmTag()         ## AsmTag, helper function entry point's TAG
+        self.asm_out = AsmBuffer()      ## AsmBuffer, helper function implementation's statement buffer
 
 ## ---------------------------------------------------------------------------
 
@@ -376,17 +387,23 @@ class Pcc:
                 if isinstance(node, c_ast.Decl):
                     self.compile_declaration(node)
                 elif isinstance(node, c_ast.FuncDef):
-                    func_sym = self.compile_function_impl(node)
+                    func_sym = self.compile_function_definition(node)
                     user_functions.append(func_sym)
                 else:
                     raise PccError(node, 'unsupported syntax')
             except PccError as e:
                 self.log_error(e)
-        ## verify that all called user functions have an implementation
+
         for user_func in self.declared_user_func:
+            ## check that all called user functions are defined
             if (user_func.has_caller or user_func.cname == 'main') and user_func.impl_node is None:
                 self.log_error(PccError(user_func.decl_node,
                     'function "%s" declared without implementation' % user_func.cname))
+            ## check that all used labels within user functions are defined
+            for label_sym in user_func.root_scope.maps[0].values():
+                if isinstance(label_sym, LabelSymbol) and not label_sym.is_defined:
+                    self.log_error(PccError(label_sym.decl_node, 'label "%s" undefined' % label_sym.cname))
+
         ## find main()
         main_func = self.find_symbol('main', filter=UserFunctionSymbol)
         if main_func is None:
@@ -481,10 +498,12 @@ class Pcc:
             return symbol
         return None
 
-    def bind_symbol(self, node, sym_obj):
-        if sym_obj.cname in self.scope.maps[0]:
+    def bind_symbol(self, node, sym_obj, scope=None):
+        if scope is None:
+            scope = self.scope
+        if sym_obj.cname in scope.maps[0]:
             raise PccError(node, 'redefinition of "%s"' % sym_obj.cname)
-        self.scope.maps[0][sym_obj.cname] = sym_obj
+        scope.maps[0][sym_obj.cname] = sym_obj
         return sym_obj
 
     def declare_enum(self, node, cname, enum_value):
@@ -499,6 +518,16 @@ class Pcc:
             raise PccError(node, '%s: external variable names must contain one of "p0", ..., "p9"' % cname)
         vm_param_name = m.groups(0)[0]
         return self.bind_symbol(node, VmParameterSymbol(cname, vm_param_name))
+
+    def declare_or_get_label(self, node, cname, set_defined=False):
+        label_sym = self.find_symbol(cname, filter=LabelSymbol)
+        if label_sym is None:
+            label_sym = self.bind_symbol(node, LabelSymbol(cname, node, set_defined), scope=self.context_func_sym.root_scope)
+        elif set_defined:
+            if label_sym.is_defined:
+                raise PccError(node, 'redefinition of label "%s"' % cname)
+            label_sym.is_defined = True
+        return label_sym
 
     def declare_function(self, node, is_vm_func=False):
         func_name = node.name
@@ -582,7 +611,7 @@ class Pcc:
         if result is None and isinstance(node, c_ast.ID):
             var_sym = self.find_symbol(node.name, filter=VariableSymbol)
             if var_sym is None:
-                raise PccError(node, 'undeclared variable "%s"' % node.name)
+                raise PccError(node, 'variable "%s" undeclared' % node.name)
             result = var_sym.asm_repr()
         return result
 
@@ -634,7 +663,7 @@ class Pcc:
         func_name = node.name.name
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
-            raise PccError(node, 'undeclared function "%s"' % func_name)
+            raise PccError(node, 'function "%s" undeclared' % func_name)
         elif dst_reg is not None and not func_sym.has_return:
             raise PccError(node, 'function "%s" declared without return value' % func_sym.decl_str())
         ## compile function call
@@ -659,7 +688,7 @@ class Pcc:
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
 
-    def compile_function_impl(self, node):
+    def compile_function_definition(self, node):
         func_sym = self.declare_function(node.decl)     ## UserFunctionSymbol func_sym
         func_name = func_sym.cname                      ## str func_name
         func_sym.impl_node = node
@@ -672,6 +701,7 @@ class Pcc:
         self.context_func_sym = func_sym
         self.push_scope()
         try:
+            func_sym.root_scope = self.scope
             self.asm_out('TAG', func_sym.asm_tag, comment=func_sym.decl_str())
             ## bind function argument variables inside nested scope before function body
             if func_sym.arg_count > 0:
@@ -681,15 +711,19 @@ class Pcc:
             ## compile function body
             terminated = False
             if node.body.block_items is not None:
+                prev_terminated = False
                 for statement_node in node.body.block_items:
-                    if terminated:
-                        self.log_warning(statement_node, 'unreachable code', func_sym)
-                        break
+                    if prev_terminated:
+                        if isinstance(statement_node, c_ast.Label):
+                            prev_terminated = False
+                        else:
+                            self.log_warning(statement_node, 'unreachable code', func_sym)
+                            break
                     try:
-                        if self.compile_statement(statement_node):
-                            terminated = True
+                        prev_terminated = self.compile_statement(statement_node)
                     except PccError as e:
                         self.log_error(e, context_func_sym=func_sym)
+                terminated = prev_terminated
             if not terminated:
                 if func_sym.has_return:
                     self.log_warning(node, 'function "%s" should return a value' %
@@ -710,7 +744,7 @@ class Pcc:
         elif isinstance(node, c_ast.Assignment):
             lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
             if lhs_sym is None:
-                raise PccError(node.lvalue, 'undeclared variable "%s"' % node.lvalue.name)
+                raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
             lhs_reg = lhs_sym.asm_repr()
             self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op)
         elif isinstance(node, c_ast.UnaryOp):
@@ -750,6 +784,13 @@ class Pcc:
             terminated = True
         elif isinstance(node, c_ast.Compound):
             terminated = self.compile_compound(node)
+        elif isinstance(node, c_ast.Label):
+            label_sym = self.declare_or_get_label(node, node.name, set_defined=True)
+            self.asm_out('TAG', label_sym.asm_tag)
+            terminated = self.compile_statement(node.stmt)
+        elif isinstance(node, c_ast.Goto):
+            label_sym = self.declare_or_get_label(node, node.name)
+            self.asm_out('JMP', label_sym.asm_tag)
         elif isinstance(node, c_ast.EmptyStatement):
             pass
         else:
@@ -759,14 +800,18 @@ class Pcc:
     def compile_compound(self, node):
         terminated = False
         if node.block_items is not None:
+            prev_terminated = False
             self.push_scope()
             try:
                 for statement_node in node.block_items:
-                    if terminated:
-                        self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
-                        break
-                    if self.compile_statement(statement_node):
-                        terminated = True
+                    if prev_terminated:
+                        if isinstance(statement_node, c_ast.Label):
+                            prev_terminated = False
+                        else:
+                            self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
+                            break
+                    prev_terminated = self.compile_statement(statement_node)
+                terminated = prev_terminated
             finally:
                 self.pop_scope()
         return terminated
