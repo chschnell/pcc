@@ -70,7 +70,9 @@ To execute the test suite on a Raspberry Pi:
 
     python pipcc.py -s tests/pcc_tests.conf
 
-## Operators
+## Supported C language subset
+
+### Operators
 
 Supported C99 operators:
  
@@ -85,7 +87,7 @@ Unsupported C99 operators:
 - 5 member access ops: `a[b]`, `*a`, `&a`, `a->b`, `a.b`
 - 6 other ops: `a(...)`, `a, b`, `(type) a`, `? :`, `sizeof`, `_Alignof (since C11)`
 
-## Statements
+### Statements
 
 Supported C99 statements:
 
@@ -96,7 +98,7 @@ Unsupported C99 statements:
 
 - `switch`, `case`
 
-## Declarations
+### Declarations
 
 Supported C99 declarations:
 
@@ -114,28 +116,30 @@ Not supported:
 - function specifier `inline`
 - alignment specifiers
 
-## VM API functions
+### Literal integer constants
+
+The C compiler supports decimal, octal or hexadecimal notation (e.g. `123`, `0775` and `0xff`, respectively) for literal integer constants, C23's binary notation (`0b0101`) is not supported.
+
+## VM interconnection
+
+### VM API functions
 
 VM API functions are special assembler commands like [`READ`](https://abyz.me.uk/rpi/pigpio/pigs.html#R/READ) or [`WRITE`](https://abyz.me.uk/rpi/pigpio/pigs.html#W/WRITE) and many others. Their equivalent C function names (in this case [`gpioRead()`](https://abyz.me.uk/rpi/pigpio/cif.html#gpioRead) and [`gpioWrite()`](https://abyz.me.uk/rpi/pigpio/cif.html#gpioWrite), respectively) are known to the compiler, and the C function prototypes are made known to the compiler in header file `vm_api.h`. This header is always implicitly included and also serves to document the VM API.
 
-## VM Variables
+### VM Variables
 
 Each global or local C variable is assigned to a unique VM variable `vX` (function arguments are treated like local variables and internally known to the caller). The first 4 variables are reserved by the compiler for internal use, leaving 146 variables for the program.
 
 * `v0` is reserved by the compiler as a helper register to store interim results, and
 * `v1`, `v2` and `v3` are reserved to store non-trivial VM API function arguments (meaning compound expressions as opposed to literal values, variable or parameter names).
 
-## VM Parameters
+### VM Parameters
 
 VM parameters `p0`, `p1`, ..., `p9` are simply mapped into the global scope by name.
 
 You can declare your own extended parameter names, use underscore `_` to separate parameter names from your extensions like in `p1_foo`, `bar_p2` or `foo_p3_bar`, for example:
 
     extern int foobar_p0;   // maps to parameter "p0"
-
-## Literal integer constants
-
-The C compiler supports decimal, octal or hexadecimal notation (e.g. `123`, `0775` and `0xff`, respectively) for literal integer constants, C23's binary notation (`0b0101`) is not supported.
 
 ## Limitations
 
