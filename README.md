@@ -145,7 +145,7 @@ You can declare your own extended parameter names, use underscore `_` to separat
 
 * No C preprocessor, only simple support for C-style comments `//` and `/* ... */` (keep it simple, not all corner-cases are covered). That means anything starting with a hash (`#`) is not supported (e.g. `#include`, `#define`, ...).
 * The VM's limits of 150 variables and 50 tags limit the supported number of variables and control flow statements available to the program. The number of used variables and tags is printed to STDERR after compilation, however exceeding those limits does not lead to a compiler error.
-* The current function call model does not support recursion. Functions can call each other, but without direct or indirect recursion.
+* The currently used function calling convention does not support recursion. Functions can call each other, but without direct or indirect recursion.
 * No type model (only `int`).
 
 ## Proposal: VM assembly language extension
