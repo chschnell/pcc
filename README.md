@@ -123,6 +123,7 @@ The C compiler supports decimal, octal or hexadecimal notation (e.g. `123`, `077
 
 * No C preprocessor, only simple support for C-style comments `//` and `/* ... */` (keep it simple, not all corner-cases are covered). That means anything starting with a hash (`#`) is not supported (e.g. `#include`, `#define`, ...).
 * The VM's limits of 150 variables and 50 labels limit the supported number of variables and control flow statements available to the program. The number of used variables and labels is printed to STDERR after compilation, however exceeding those limits does not lead to a compiler error.
+* The current function call model does not support recursion. Functions can call each other, but without direct or indirect recursion.
 * No type model (only `int`).
 
 ## Proposal: VM assembly language extension
