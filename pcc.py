@@ -196,32 +196,32 @@ class AsmBuffer:
             prev_stmt = out_buf[-1]
             if isinstance(prev_stmt, AsmCmd) and isinstance(curr_stmt, AsmCmd):
                 if prev_stmt.cmd == 'RET' and curr_stmt.cmd == 'RET':
-                    ## "RET; <RET>" => drop "RET", keep "<RET>"
+                    ## "RET + <RET>" => drop "RET", keep "<RET>"
                     continue
                 elif prev_stmt.cmd == 'JMP' and curr_stmt.cmd == 'JMP':
-                    ## "JMP X; <JMP Y>" => drop "JMP Y", keep "<JMP X>"
+                    ## "JMP X + <JMP Y>" => drop "JMP Y", keep "<JMP X>"
                     continue
                 elif prev_stmt.cmd == 'STA' and curr_stmt.cmd == 'LDA' and prev_stmt.args[0] == curr_stmt.args[0]:
-                    ## "STA X; <LDA X>" => drop "LDA Y", keep "STA X"
+                    ## "STA X + <LDA X>" => drop "<LDA Y>", keep "STA X"
                     continue
             elif isinstance(prev_stmt, AsmTag) and isinstance(curr_stmt, AsmTag):
-                ## "TAG X; <TAG Y>" => replace all uses of "Y" with "X", keep "TAG X", drop "TAG Y"
+                ## "TAG X + <TAG Y>" => replace all uses of "Y" with "X", keep "TAG X", drop "TAG Y"
                 self._replace_tag(curr_stmt, prev_stmt)
                 continue
             elif isinstance(prev_stmt, AsmTag) and isinstance(curr_stmt, AsmCmd) and curr_stmt.cmd == 'JMP':
                 if len(out_buf) > 2 and isinstance(out_buf[-2], AsmCmd) and out_buf[-2].cmd == 'JMP':
-                    ## "JMP Z; TAG X; <JMP Y>" => replace all uses of "X" with "Y", drop "TAG X" and "JMP Y"
+                    ## "JMP Z + TAG X + <JMP Y>" => replace all uses of "X" with "Y", drop both "TAG X" and "<JMP Y>"
                     self._replace_tag(prev_stmt, curr_stmt.args[0])
                     del out_buf[-1]
                     continue
                 else:
-                    ## "TAG X; <JMP Y>" => replace all uses of "X" with "Y", drop "TAG X", keep "JMP Y"
+                    ## "TAG X + <JMP Y>" => replace all uses of "X" with "Y", drop "TAG X", keep "<JMP Y>"
                     self._replace_tag(prev_stmt, curr_stmt.args[0])
                     out_buf[-1] = curr_stmt
                     continue
             elif isinstance(prev_stmt, AsmCmd) and isinstance(curr_stmt, AsmTag):
                 if prev_stmt.cmd == 'JMP' and prev_stmt.args[0] == curr_stmt:
-                    ## "JMP X; <TAG X>" => drop "JMP X", keep "<TAG X>"
+                    ## "JMP X + <TAG X>" => drop "JMP X", keep "<TAG X>"
                     out_buf[-1] = curr_stmt
                     continue
             out_buf.append(curr_stmt)
@@ -283,12 +283,12 @@ class AbstractSymbol:
         raise NotImplementedError()     ## that properly expand themselves with str()
 
 class EnumSymbol(AbstractSymbol):
-    def __init__(self, cname, literal_value):
+    def __init__(self, cname, const_value):
         super().__init__(cname)
-        self.literal_value = literal_value
+        self.const_value = const_value
 
-    def asm_repr(self):                 ## str literal_value, integer value as str
-        return self.literal_value
+    def asm_repr(self):                 ## str const_value, integer represented as str
+        return self.const_value
 
 class VariableSymbol(AbstractSymbol):
     pass
@@ -324,8 +324,17 @@ class FunctionSymbol(AbstractSymbol):
         super().__init__(cname)
         self.has_return = has_return    ## bool, True: function returns a value
         self.arg_count = arg_count      ## int, number of function arguments
+        self.arg_names = []             ## list(str), argument names from implementation's declaration
 
-class VmFunctionSymbol(FunctionSymbol):
+    def parse_arg_names(self, decl):    ## c_ast.Decl decl: function declaration
+        if self.arg_count > 0:
+            self.arg_names = [p.name for p in decl.type.args.params]
+
+    def decl_str(self):
+        return '%s %s(%s)' % ('int' if self.has_return else 'void',
+            self.cname, ', '.join(['int ' + n for n in self.arg_names]))
+
+class VmApiFunctionSymbol(FunctionSymbol):
     def __init__(self, cname, has_return, arg_count, vm_func_cmd):
         super().__init__(cname, has_return, arg_count)
         self.vm_func_cmd = vm_func_cmd
@@ -333,11 +342,43 @@ class VmFunctionSymbol(FunctionSymbol):
     def asm_repr(self):                 ## str vm_func_cmd, VM's special function command name
         return self.vm_func_cmd
 
-class UserFunctionSymbol(FunctionSymbol):
+    def map_argument(self, node, i_arg, const_arg):
+        return const_arg
+
+class VmApiFunction_gpioSetPullUpDown(VmApiFunctionSymbol):
+    def map_argument(self, node, i_arg, const_arg):
+        if i_arg == 1:
+            ## int gpioSetPullUpDown(unsigned gpio, unsigned pud), 2nd argument "pud":
+            ##   index    | 0          | 1           | 2
+            ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
+            ##   PUD g p  | "O"        | "D"         | "U"
+            if const_arg is None:
+                raise PccError(node, '%s: compile-time constant required for argument "%s"' % (
+                    self.decl_str(), self.arg_names[i_arg]))
+            const_int = int(const_arg)
+            if const_int >= 0 and const_int <= 2:
+                const_arg = 'ODU'[const_int]
+        return const_arg
+
+class VmApiFunction_gpioSetMode(VmApiFunctionSymbol):
+    def map_argument(self, node, i_arg, const_arg):
+        if i_arg == 1:
+            ## int gpioSetMode(unsigned gpio, unsigned mode), 2nd argument "mode":
+            ##   index     | 0        | 1         | 2       | 3       | 4       | 5       | 6       | 7
+            ##   vm_api.h  | PI_INPUT | PI_OUTPUT | PI_ALT5 | PI_ALT4 | PI_ALT0 | PI_ALT1 | PI_ALT2 | PI_ALT3
+            ##   MODES g m | "R"      | "W"       | "5"     | "4"     | "0"     | "1"     | "2"     | "3"
+            if const_arg is None:
+                raise PccError(node, '%s: compile-time constant required for argument "%s"' % (
+                    self.decl_str(), self.arg_names[i_arg]))
+            const_int = int(const_arg)
+            if const_int >= 0 and const_int <= 7:
+                const_arg = 'RW540123'[const_int]
+        return const_arg
+
+class ProgramFunctionSymbol(FunctionSymbol):
     def __init__(self, cname, has_return, arg_count, decl_node):
         super().__init__(cname, has_return, arg_count)
         self.decl_node = decl_node      ## c_ast.Decl, first declaration's node
-        self.arg_names = []             ## list(str), argument names from implementation's declaration
         self.has_caller = False         ## bool, True: function has at least one caller
         self.root_scope = None          ## ChainMap, function's root scope
         self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
@@ -348,10 +389,6 @@ class UserFunctionSymbol(FunctionSymbol):
 
     def asm_repr(self):                 ## AsmTag asm_tag, str() expands to function entry point's TAG
         return self.asm_tag
-
-    def decl_str(self):
-        return '%s %s(%s)' % ('int' if self.has_return else 'void',
-            self.cname, ', '.join(['int ' + n for n in self.arg_names]))
 
 class HelperFunction:
     def __init__(self, func_name):
@@ -370,48 +407,48 @@ class Pcc:
         self.tag_count = None               ## int, number of VM tags allocated
         self.asm_out = AsmBuffer()          ## AsmBuffer, current output buffer, initialized with init seg
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
-        self.context_func_sym = None        ## None or UserFunctionSymbol, current function context
+        self.context_func_sym = None        ## None or ProgramFunctionSymbol, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
-        self.declared_user_func = set()     ## set(UserFunctionSymbol func_sym), all declared user functions
+        self.declared_prog_func = set()     ## set(ProgramFunctionSymbol func_sym), all declared program functions
         self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
         self.log_error_location = None      ## most recent reported error location
         self.all_buffers = None             ## list(AsmBuf asm_buf, ...), list of all buffers
 
     def compile(self, root_node, do_reduce=True):
-        user_functions = []                 ## list(UserFunctionSymbol func)
-        ## compile top-level declarations and user functions
+        prog_functions = []                 ## list(ProgramFunctionSymbol func), all implemented program functions
+        ## compile top-level declarations and program functions
         for node in root_node:
             try:
                 if isinstance(node, c_ast.Decl):
                     self.compile_declaration(node)
                 elif isinstance(node, c_ast.FuncDef):
                     func_sym = self.compile_function_definition(node)
-                    user_functions.append(func_sym)
+                    prog_functions.append(func_sym)
                 else:
                     raise PccError(node, 'unsupported syntax')
             except PccError as e:
                 self.log_error(e)
 
-        ## find main()
-        main_func = self.find_symbol('main', filter=UserFunctionSymbol)
+        ## find main() program function
+        main_func = self.find_symbol('main', filter=ProgramFunctionSymbol)
         if main_func is None:
             self.log_error(PccError(None, 'missing main() function implementation'))
         else:
             main_func.has_caller = True
 
-        for user_func in self.declared_user_func:
-            if user_func.has_caller and user_func.impl_node is None:
-                ## check that all called user functions are defined
-                self.log_error(PccError(user_func.decl_node,
-                    'function "%s" declared without implementation' % user_func.cname))
-            elif not user_func.has_caller:
+        for prog_func in self.declared_prog_func:
+            if prog_func.has_caller and prog_func.impl_node is None:
+                ## check that all called program functions are actually defined
+                self.log_error(PccError(prog_func.decl_node,
+                    'function "%s" declared without implementation' % prog_func.cname))
+            elif not prog_func.has_caller:
                 ## drop unused functions
-                user_functions.remove(user_func)
+                prog_functions.remove(prog_func)
             else:
-                ## check that all used labels within user functions are defined
-                for label_sym in user_func.root_scope.maps[0].values():
+                ## check that all used labels within program functions are defined
+                for label_sym in prog_func.root_scope.maps[0].values():
                     if isinstance(label_sym, LabelSymbol) and not label_sym.is_defined:
                         self.log_error(PccError(label_sym.decl_node,
                             'label "%s" undefined' % label_sym.cname))
@@ -422,17 +459,17 @@ class Pcc:
             self.asm_out('HALT')
             ## compile helper functions
             self.compile_helper_function_impl()
-            all_functions = user_functions + list(self.helper_functions.values())
+            all_functions = prog_functions + list(self.helper_functions.values())
             self.all_buffers = [self.asm_out] + [f.asm_out for f in all_functions]
-            ## drop unused tags in user functions
-            tags = dict()   ## dict(AsmTag asm_tag: int use_count), preseeded with user and helper function tags
+            ## drop unused tags in program functions
+            tags = dict()   ## dict(AsmTag asm_tag: int use_count), preseeded with program and helper function tags
             for func_sym in all_functions:
                 tags[func_sym.asm_tag] = 1
-            for func in user_functions:
+            for func in prog_functions:
                 func.asm_out.drop_unused_tags(tags.copy())
-            ## reduce user functions
+            ## reduce program functions
             if do_reduce:
-                for func in user_functions:
+                for func in prog_functions:
                     func.asm_out.reduce()
             ## bind VM tags
             self.tag_count = 0
@@ -555,21 +592,27 @@ class Pcc:
         ## check possible function prototype redeclaration
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is not None:
-            sym_is_vm_func = isinstance(func_sym, VmFunctionSymbol)
+            sym_is_vm_func = isinstance(func_sym, VmApiFunctionSymbol)
             if sym_is_vm_func != is_vm_func or \
                     func_sym.has_return != has_return or \
                     func_sym.arg_count != arg_count:
                 raise PccError(node, 'function prototype conflicts with previous declaration')
             return func_sym
-        ## add function declaration to scope
+        ## bind function declaration to current scope
         if is_vm_func:
             if func_name not in VM_FUNCTION_CMD:
                 raise PccError(node, 'unknown VM function name "%s"' % func_name)
             vm_func_cmd = VM_FUNCTION_CMD[func_name]
-            func_sym = VmFunctionSymbol(func_name, has_return, arg_count, vm_func_cmd)
+            if func_name == 'gpioSetPullUpDown':
+                func_sym = VmApiFunction_gpioSetPullUpDown(func_name, has_return, arg_count, vm_func_cmd)
+            elif func_name == 'gpioSetMode':
+                func_sym = VmApiFunction_gpioSetMode(func_name, has_return, arg_count, vm_func_cmd)
+            else:
+                func_sym = VmApiFunctionSymbol(func_name, has_return, arg_count, vm_func_cmd)
+            func_sym.parse_arg_names(node)
         else:
-            func_sym = UserFunctionSymbol(func_name, has_return, arg_count, node)
-            self.declared_user_func.add(func_sym)
+            func_sym = ProgramFunctionSymbol(func_name, has_return, arg_count, node)
+            self.declared_prog_func.add(func_sym)
         return self.bind_symbol(node, func_sym)
 
     def declare_helper_function(self, node, func_name):
@@ -596,25 +639,25 @@ class Pcc:
                 return True
         raise PccError(node, 'unsupported data type "%s"' % (' '.join(type_names)))
 
-    def try_parse_literal(self, node):
+    def try_parse_constant(self, node):
         result = None
         if isinstance(node, c_ast.Constant):
             result = node.value
         elif isinstance(node, c_ast.ID):
             enum_sym = self.find_symbol(node.name, filter=EnumSymbol)
             if enum_sym is not None:
-                result = enum_sym.literal_value
+                result = enum_sym.const_value
         elif isinstance(node, c_ast.UnaryOp) and node.op == '-':
             if isinstance(node.expr, c_ast.Constant):
                 result = str(-int(node.expr.value, 0))
             elif isinstance(node.expr, c_ast.ID):
                 enum_sym = self.find_symbol(node.expr.name, filter=EnumSymbol)
                 if enum_sym is not None:
-                    result = str(-int(enum_sym.literal_value, 0))
+                    result = str(-int(enum_sym.const_value, 0))
         return result
 
     def try_parse_term(self, node):
-        result = self.try_parse_literal(node)
+        result = self.try_parse_constant(node)
         if result is None and isinstance(node, c_ast.ID):
             var_sym = self.find_symbol(node.name, filter=VariableSymbol)
             if var_sym is None:
@@ -656,10 +699,10 @@ class Pcc:
                         enum_value = str(enum_cursor)
                         enum_cursor += 1
                     else:
-                        literal_value = self.try_parse_literal(value_node)
-                        if literal_value is None:
+                        const_value = self.try_parse_constant(value_node)
+                        if const_value is None:
                             raise PccError(value_node, 'unsupported enum syntax')
-                        enum_value = literal_value
+                        enum_value = const_value
                         enum_cursor = int(enum_value, 0) + 1
                     self.declare_enum(enum_node, enum_node.name, enum_value)
                 accepted = True
@@ -673,37 +716,21 @@ class Pcc:
             raise PccError(node, 'function "%s" undeclared' % func_name)
         elif dst_reg is not None and not func_sym.has_return:
             raise PccError(node, 'function "%s" declared without return value' % func_sym.decl_str())
-        ## compile function call
-        if isinstance(func_sym, VmFunctionSymbol):
+        if isinstance(func_sym, VmApiFunctionSymbol):
+            ## compile call to VM API function
             args = []
             for i_arg in range(func_sym.arg_count):
                 arg_expr_node = node.args.exprs[i_arg]
-                arg_term = self.try_parse_term(arg_expr_node)
-                if func_sym.cname in ('gpioSetPullUpDown', 'gpioSetMode') and i_arg == 1:
-                    if arg_term is None:
-                        raise PccError(node, 'function "%s" requires literal int for 2nd argument' % func_name)
-                    arg_term_int = int(arg_term)
-                    if func_sym.cname == 'gpioSetPullUpDown' and arg_term_int >= 0 and arg_term_int <= 2:
-                        ## vm_api.h: 0 = PI_PUD_OFF: 'O', 1 = PI_PUD_DOWN: 'D', 2 = PI_PUD_UP: 'U'
-                        arg_term = 'ODU'[arg_term_int]
-                    elif func_sym.cname == 'gpioSetMode' and arg_term_int >= 0 and arg_term_int <= 7:
-                        ## vm_api.h: 
-                        ##   0 = PI_INPUT:  'R'
-                        ##   1 = PI_OUTPUT: 'W'
-                        ##   2 = PI_ALT5:   '5'
-                        ##   3 = PI_ALT4:   '4'
-                        ##   4 = PI_ALT0:   '0'
-                        ##   5 = PI_ALT1:   '1'
-                        ##   6 = PI_ALT2:   '2'
-                        ##   7 = PI_ALT3:   '3'
-                        arg_term = 'RW540123'[arg_term_int]
-                elif arg_term is None:
+                arg_term = func_sym.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
+                if arg_term is None:
+                    arg_term = self.try_parse_term(arg_expr_node)
+                if arg_term is None:
                     arg_term = ARG_REGS[i_arg]
                     self.compile_assignment(arg_term, arg_expr_node)
                 args.append(arg_term)
             self.asm_out(func_sym.vm_func_cmd, *args)
-        else:   ## isinstance(func_sym, UserFunctionSymbol)
-            ## assign function argument values to their VM variables
+        else:   ## isinstance(func_sym, ProgramFunctionSymbol)
+            ## compile call to program function: assign function argument values to their VM variables
             for i_arg in range(func_sym.arg_count):
                 arg_asm_var = func_sym.arg_vars[i_arg]
                 arg_expr = node.args.exprs[i_arg]
@@ -714,12 +741,10 @@ class Pcc:
             self.asm_out('STA', dst_reg)
 
     def compile_function_definition(self, node):
-        func_sym = self.declare_function(node.decl)     ## UserFunctionSymbol func_sym
+        func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
         func_name = func_sym.cname                      ## str func_name
         func_sym.impl_node = node
-        ## parse function's argument names
-        if func_sym.arg_count > 0:
-            func_sym.arg_names = [p.name for p in node.decl.type.args.params]
+        func_sym.parse_arg_names(node.decl)
         ## compile function
         prev_asm_out = self.asm_out
         self.asm_out = func_sym.asm_out
