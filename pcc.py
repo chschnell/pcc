@@ -381,7 +381,7 @@ class Pcc:
 
     def compile(self, root_node, do_reduce=True):
         user_functions = []                 ## list(UserFunctionSymbol func)
-        ## compile global declarations and user functions
+        ## compile top-level declarations and user functions
         for node in root_node:
             try:
                 if isinstance(node, c_ast.Decl):
@@ -394,20 +394,27 @@ class Pcc:
             except PccError as e:
                 self.log_error(e)
 
-        for user_func in self.declared_user_func:
-            ## check that all called user functions are defined
-            if (user_func.has_caller or user_func.cname == 'main') and user_func.impl_node is None:
-                self.log_error(PccError(user_func.decl_node,
-                    'function "%s" declared without implementation' % user_func.cname))
-            ## check that all used labels within user functions are defined
-            for label_sym in user_func.root_scope.maps[0].values():
-                if isinstance(label_sym, LabelSymbol) and not label_sym.is_defined:
-                    self.log_error(PccError(label_sym.decl_node, 'label "%s" undefined' % label_sym.cname))
-
         ## find main()
         main_func = self.find_symbol('main', filter=UserFunctionSymbol)
         if main_func is None:
-            self.log_error(PccError(None, 'missing main() function'))
+            self.log_error(PccError(None, 'missing main() function implementation'))
+        else:
+            main_func.has_caller = True
+
+        for user_func in self.declared_user_func:
+            if user_func.has_caller and user_func.impl_node is None:
+                ## check that all called user functions are defined
+                self.log_error(PccError(user_func.decl_node,
+                    'function "%s" declared without implementation' % user_func.cname))
+            elif not user_func.has_caller:
+                ## drop unused functions
+                user_functions.remove(user_func)
+            else:
+                ## check that all used labels within user functions are defined
+                for label_sym in user_func.root_scope.maps[0].values():
+                    if isinstance(label_sym, LabelSymbol) and not label_sym.is_defined:
+                        self.log_error(PccError(label_sym.decl_node,
+                            'label "%s" undefined' % label_sym.cname))
 
         if self.error_count == 0:
             ## append main() CALL to init segment
@@ -672,7 +679,25 @@ class Pcc:
             for i_arg in range(func_sym.arg_count):
                 arg_expr_node = node.args.exprs[i_arg]
                 arg_term = self.try_parse_term(arg_expr_node)
-                if arg_term is None:
+                if func_sym.cname in ('gpioSetPullUpDown', 'gpioSetMode') and i_arg == 1:
+                    if arg_term is None:
+                        raise PccError(node, 'function "%s" requires literal int for 2nd argument' % func_name)
+                    arg_term_int = int(arg_term)
+                    if func_sym.cname == 'gpioSetPullUpDown' and arg_term_int >= 0 and arg_term_int <= 2:
+                        ## vm_api.h: 0 = PI_PUD_OFF: 'O', 1 = PI_PUD_DOWN: 'D', 2 = PI_PUD_UP: 'U'
+                        arg_term = 'ODU'[arg_term_int]
+                    elif func_sym.cname == 'gpioSetMode' and arg_term_int >= 0 and arg_term_int <= 7:
+                        ## vm_api.h: 
+                        ##   0 = PI_INPUT:  'R'
+                        ##   1 = PI_OUTPUT: 'W'
+                        ##   2 = PI_ALT5:   '5'
+                        ##   3 = PI_ALT4:   '4'
+                        ##   4 = PI_ALT0:   '0'
+                        ##   5 = PI_ALT1:   '1'
+                        ##   6 = PI_ALT2:   '2'
+                        ##   7 = PI_ALT3:   '3'
+                        arg_term = 'RW540123'[arg_term_int]
+                elif arg_term is None:
                     arg_term = ARG_REGS[i_arg]
                     self.compile_assignment(arg_term, arg_expr_node)
                 args.append(arg_term)
