@@ -126,6 +126,7 @@ def format_src_quote(c_source_files, filename, row, col):
 class AsmVar:
     def __init__(self):
         self.vm_var_id = None   ## None (unbound) or str "v0" ... "v149"
+        self.var_sym = None     ## None or VmVariableSymbol
 
     def bind(self, vm_var_nr):
         self.vm_var_id = 'v%d' % vm_var_nr
@@ -252,18 +253,16 @@ class AsmBuffer:
                 tag_counter += 1
         return tag_counter
 
-    def allocate_vm_variables(self, var_id_offset):
-        var_counter = 0
-        vars_bound = set()
+    def collect_vm_variables(self, global_asm_vars, local_asm_vars):
         for asm_cmd in self.stmt_buf:
             if isinstance(asm_cmd, AsmCmd):
-                for var_arg in asm_cmd.args:
-                    if isinstance(var_arg, AsmVar) and var_arg not in vars_bound:
-                        var_arg.bind(var_id_offset + var_counter)
-                        var_counter += 1
-                        vars_bound.add(var_arg)
-        return var_id_offset + var_counter
-
+                for asm_var in asm_cmd.args:
+                    if isinstance(asm_var, AsmVar):
+                        if asm_var.var_sym.context_func_sym is None:
+                            global_asm_vars[asm_var] = True
+                        else:
+                            local_asm_vars[asm_var] = True
+        
     def format_statements(self, indent, use_comments):
         asm_lines = []
         for asm_stmt in self.stmt_buf:
@@ -294,9 +293,17 @@ class VariableSymbol(AbstractSymbol):
     pass
 
 class VmVariableSymbol(VariableSymbol):
-    def __init__(self, cname, asm_var=None):
+    def __init__(self, cname, decl_node, context_func_sym, asm_var):
         super().__init__(cname)
-        self.asm_var = asm_var if asm_var is not None else AsmVar()
+        self.decl_node = decl_node
+        self.context_func_sym = context_func_sym
+        if asm_var is None:
+            self.asm_var = AsmVar()
+        else:
+            if asm_var.var_sym is not None:
+                raise Exception('internal error: function argument\'s asm_var is already assigned a var_sym')
+            self.asm_var = asm_var
+        self.asm_var.var_sym = self
 
     def asm_repr(self):                 ## AsmVar asm_var, str() expands to VM variable name ("vN")
         return self.asm_var
@@ -415,6 +422,7 @@ class Pcc:
         self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
         self.log_error_location = None      ## most recent reported error location
         self.all_buffers = None             ## list(AsmBuf asm_buf, ...), list of all buffers
+        self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
 
     def compile(self, root_node, do_reduce=True):
         prog_functions = []                 ## list(ProgramFunctionSymbol func), all implemented program functions
@@ -479,20 +487,39 @@ class Pcc:
                 vm_tag_offset = ((vm_tag_offset + n_tags + 10) // 10) * 10
                 self.tag_count += n_tags
             ## bind VM variables
-            vm_var_offset = VARS_RESERVERD
+            global_asm_vars = dict()
+            local_asm_vars = dict()
             for asm_buf in self.all_buffers:
-                vm_var_offset = asm_buf.allocate_vm_variables(vm_var_offset)
-            self.var_count = vm_var_offset
+                asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
+            var_count = VARS_RESERVERD
+            for asm_var in global_asm_vars.keys():
+                asm_var.bind(var_count)
+                var_count += 1
+            for asm_var in local_asm_vars.keys():
+                asm_var.bind(var_count)
+                var_count += 1
+            self.var_count = var_count
+            self.all_asm_vars = list(global_asm_vars.keys())
+            self.all_asm_vars.extend(local_asm_vars.keys())
         return self.error_count
 
     def encode_asm(self, use_comments=False, file=None):
         asm_lines = []
+        if use_comments and len(self.all_asm_vars) > 0:
+            asm_lines.append('; Variables:')
+            asm_lines.append(';')
+            for asm_var in self.all_asm_vars:
+                var_sym = asm_var.var_sym
+                coord = var_sym.decl_node.coord
+                fqname = var_sym.cname
+                if var_sym.context_func_sym is not None:
+                    fqname = '%s.%s' % (var_sym.context_func_sym.cname, fqname)
+                asm_lines.append('; %3s: %s:%s:%s: int %s' % (asm_var,
+                    PurePath(coord.file).name, coord.line, coord.column, fqname))
         for asm_buf in self.all_buffers:
-            if len(asm_lines) == 0:
-                asm_lines = asm_buf.format_statements('', use_comments)
-            else:
+            if len(asm_lines) > 0:
                 asm_lines.append('')
-                asm_lines.extend(asm_buf.format_statements('    ', use_comments))
+            asm_lines.extend(asm_buf.format_statements('    ', use_comments))
         result = '\n'.join(asm_lines)
         if file is not None:
             print(result, file=file)
@@ -554,12 +581,12 @@ class Pcc:
         return self.bind_symbol(node, EnumSymbol(cname, enum_value))
 
     def declare_variable(self, node, cname, asm_var=None):
-        return self.bind_symbol(node, VmVariableSymbol(cname, asm_var=asm_var))
+        return self.bind_symbol(node, VmVariableSymbol(cname, node, self.context_func_sym, asm_var))
 
     def declare_parameter(self, node, cname):
         m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
         if not m:
-            raise PccError(node, '%s: external variable names must contain one of "p0", ..., "p9"' % cname)
+            raise PccError(node, '%s: external variable names must contain one of "p0", "p1", ..., "p9"' % cname)
         vm_param_name = m.groups(0)[0]
         return self.bind_symbol(node, VmParameterSymbol(cname, vm_param_name))
 
