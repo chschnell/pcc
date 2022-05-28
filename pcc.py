@@ -441,7 +441,7 @@ class Pcc:
         for node in root_node:
             try:
                 if isinstance(node, c_ast.Decl):
-                    self.compile_declaration(node)
+                    self.compile_Decl_node(node)
                 elif isinstance(node, c_ast.FuncDef):
                     func_sym = self.compile_function_definition(node)
                     prog_functions.append(func_sym)
@@ -717,191 +717,20 @@ class Pcc:
 
     ## Code-generating functions
 
-    def compile_declaration(self, node):
-        accepted = False
-        if len(node.align) == 0 and node.bitsize is None and len(node.funcspec) == 0:
-            is_extern = False
-            if len(node.storage) > 0:
-                is_extern = len(node.storage) == 1 and node.storage[0] == 'extern'
-                if not is_extern:
-                    raise PccError(node, 'unsupported storage qualifier "%s"' % ' '.join(node.storage))
-            decl_type = node.type
-            if isinstance(decl_type, c_ast.TypeDecl):
-                var_name = decl_type.declname
-                self.try_parse_int_decl(decl_type, accept_void=False)
-                if len(decl_type.quals) != 0:
-                    raise PccError(node, 'unsupported type qualifier "%s"' % ' '.join(decl_type.quals))
-                if is_extern:
-                    var_sym = self.declare_parameter(node, var_name)
-                else:
-                    var_sym = self.declare_variable(node, var_name)
-                if node.init is not None:
-                    self.compile_assignment(var_sym.asm_repr(), node.init)
-                accepted = True
-            elif isinstance(decl_type, c_ast.FuncDecl):
-                self.declare_function(node, is_vm_func=is_extern)
-                accepted = True
-            elif isinstance(decl_type, c_ast.Enum):
-                self.declare_enum(decl_type)
-                accepted = True
-        if not accepted:
-            raise PccError(node, 'unsupported declaration syntax')
-
-    def compile_function_call(self, node, dst_reg=None):
-        func_name = node.name.name
-        func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
-        if func_sym is None:
-            raise PccError(node, 'function "%s" undeclared' % func_name)
-        elif dst_reg is not None and not func_sym.has_return:
-            raise PccError(node, 'function "%s" declared without return value' % func_sym.decl_str())
-        if isinstance(func_sym, VmApiFunctionSymbol):
-            ## compile call to VM API function
-            args = []
-            for i_arg in range(func_sym.arg_count):
-                arg_expr_node = node.args.exprs[i_arg]
-                arg_term = func_sym.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
-                if arg_term is None:
-                    arg_term = self.try_parse_term(arg_expr_node)
-                if arg_term is None:
-                    arg_term = ARG_REGS[i_arg]
-                    self.compile_assignment(arg_term, arg_expr_node)
-                args.append(arg_term)
-            self.asm_out(func_sym.vm_func_cmd, *args)
-        else:   ## isinstance(func_sym, ProgramFunctionSymbol)
-            ## compile call to program function: assign function argument values to their VM variables
-            for i_arg in range(func_sym.arg_count):
-                arg_asm_var = func_sym.arg_vars[i_arg]
-                arg_expr = node.args.exprs[i_arg]
-                self.compile_assignment(arg_asm_var, arg_expr)
-            self.asm_out('CALL', func_sym.asm_tag, comment=func_name + '()')
-            func_sym.has_caller = True
+    def compile_expression(self, node, dst_reg=None):   ## A := eval(expr), F: undefined!
+        node_term = self.try_parse_term(node)
+        if node_term is not None:
+            self.asm_out('LDA', node_term)
+        elif isinstance(node, c_ast.UnaryOp):
+            self.compile_UnaryOp_node(node)
+        elif isinstance(node, c_ast.BinaryOp):
+            self.compile_BinaryOp_node(node)
+        elif isinstance(node, c_ast.FuncCall):
+            self.compile_FuncCall_node(node)
+        else:
+            raise PccError(node, 'unsupported expression syntax')
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
-
-    def compile_function_definition(self, node):
-        func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
-        func_sym.impl_node = node
-        func_sym.parse_arg_names(node.decl)
-        ## enter function scope
-        self.context_func_sym = func_sym
-        prev_asm_out = self.asm_out
-        self.asm_out = func_sym.asm_out
-        self.push_scope()
-        try:
-            func_sym.root_scope = self.scope
-            self.asm_out('TAG', func_sym.asm_tag, comment=func_sym.decl_str())
-            ## bind function argument variables to nested
-            if func_sym.arg_count > 0:
-                arg_vars = func_sym.arg_vars
-                for i_arg, arg_name in enumerate(func_sym.arg_names):
-                    self.declare_variable(node.body, arg_name, asm_var=arg_vars[i_arg])
-            ## compile function body
-            terminated = False
-            if node.body.block_items is not None:
-                prev_terminated = False
-                for statement_node in node.body.block_items:
-                    if prev_terminated:
-                        if isinstance(statement_node, c_ast.Label):
-                            prev_terminated = False
-                        else:
-                            self.log_warning(statement_node, 'unreachable code', func_sym)
-                            break
-                    try:
-                        prev_terminated = self.compile_statement(statement_node)
-                    except PccError as e:
-                        self.log_error(e, context_func_sym=func_sym)
-                terminated = prev_terminated
-            if not terminated:
-                if func_sym.has_return:
-                    self.log_warning(node, 'function "%s" should return a value' %
-                        func_sym.decl_str(), func_sym)
-                self.asm_out('RET')
-        except PccError as e:
-            self.log_error(e, context_func_sym=func_sym)
-        finally:
-            self.pop_scope()
-            self.asm_out = prev_asm_out
-            self.context_func_sym = None
-        return func_sym
-
-    def compile_statement(self, node):
-        terminated = False
-        if isinstance(node, c_ast.Decl):
-            self.compile_declaration(node)
-        elif isinstance(node, c_ast.Assignment):
-            lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
-            if lhs_sym is None:
-                raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
-            lhs_reg = lhs_sym.asm_repr()
-            self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op)
-        elif isinstance(node, c_ast.UnaryOp):
-            self.compile_unary_op(node)
-        elif isinstance(node, c_ast.BinaryOp):
-            self.compile_binary_op(node)
-        elif isinstance(node, c_ast.FuncCall):
-            self.compile_function_call(node)
-        elif isinstance(node, c_ast.If):
-            terminated = self.compile_if(node)
-        elif isinstance(node, c_ast.While):
-            self.compile_while(node)
-        elif isinstance(node, c_ast.DoWhile):
-            self.compile_do_while(node)
-        elif isinstance(node, c_ast.For):
-            self.compile_for(node)
-        elif isinstance(node, c_ast.Continue):
-            if self.loop_continue_tag is None:
-                raise PccError(node, '"continue" outside loop not allowed')
-            self.asm_out('JMP', self.loop_continue_tag)
-        elif isinstance(node, c_ast.Break):
-            if self.loop_break_tag is None:
-                raise PccError(node, '"break" outside loop not allowed')
-            self.asm_out('JMP', self.loop_break_tag)
-        elif isinstance(node, c_ast.Return):
-            ret_val_expected = self.context_func_sym.has_return
-            ret_val_given = node.expr is not None
-            if ret_val_given and not ret_val_expected:
-                self.log_warning(node, 'function "%s" should not return a value' %
-                    self.context_func_sym.decl_str(), self.context_func_sym)
-            elif not ret_val_given and ret_val_expected:
-                self.log_warning(node, 'function "%s" should return a value' %
-                    self.context_func_sym.decl_str(), self.context_func_sym)
-            elif ret_val_given:
-                self.compile_expression(node.expr)
-            self.asm_out('RET')
-            terminated = True
-        elif isinstance(node, c_ast.Compound):
-            terminated = self.compile_compound(node)
-        elif isinstance(node, c_ast.Label):
-            label_sym = self.declare_or_get_label(node, node.name, set_defined=True)
-            self.asm_out('TAG', label_sym.asm_tag)
-            terminated = self.compile_statement(node.stmt)
-        elif isinstance(node, c_ast.Goto):
-            label_sym = self.declare_or_get_label(node, node.name)
-            self.asm_out('JMP', label_sym.asm_tag)
-        elif isinstance(node, c_ast.EmptyStatement):
-            pass
-        else:
-            raise PccError(node, 'unsupported statement syntax')
-        return terminated
-
-    def compile_compound(self, node):
-        terminated = False
-        if node.block_items is not None:
-            prev_terminated = False
-            self.push_scope()
-            try:
-                for statement_node in node.block_items:
-                    if prev_terminated:
-                        if isinstance(statement_node, c_ast.Label):
-                            prev_terminated = False
-                        else:
-                            self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
-                            break
-                    prev_terminated = self.compile_statement(statement_node)
-                terminated = prev_terminated
-            finally:
-                self.pop_scope()
-        return terminated
 
     def compile_assignment(self, dst_reg, rhs_node, assign_op='='):
         rhs_term = self.try_parse_term(rhs_node)
@@ -922,22 +751,43 @@ class Pcc:
         else:
             raise PccError(rhs_node, 'unsupported assignment operator "%s"' % assign_op)
 
-    def compile_expression(self, node, dst_reg=None):   ## A := eval(expr), F: undefined!
-        node_term = self.try_parse_term(node)
-        if node_term is not None:
-            self.asm_out('LDA', node_term)
-        elif isinstance(node, c_ast.UnaryOp):
-            self.compile_unary_op(node)
-        elif isinstance(node, c_ast.BinaryOp):
-            self.compile_binary_op(node)
-        elif isinstance(node, c_ast.FuncCall):
-            self.compile_function_call(node)
-        else:
-            raise PccError(node, 'unsupported expression syntax')
-        if dst_reg is not None:
-            self.asm_out('STA', dst_reg)
+    def compile_function_definition(self, node):
+        func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
+        func_sym.impl_node = node
+        func_sym.parse_arg_names(node.decl)
+        self.context_func_sym = func_sym
+        prev_asm_out = self.asm_out
+        self.asm_out = func_sym.asm_out
+        self.push_scope()
+        try:
+            func_sym.root_scope = self.scope
+            self.asm_out('TAG', func_sym.asm_tag, comment=func_sym.decl_str())
+            if func_sym.arg_count > 0:
+                arg_vars = func_sym.arg_vars
+                for i_arg, arg_name in enumerate(func_sym.arg_names):
+                    self.declare_variable(node.body, arg_name, asm_var=arg_vars[i_arg])
+            terminated = self.compile_Compound_node(node.body)
+            if not terminated:
+                if func_sym.has_return:
+                    self.log_warning(node, 'function "%s" should return a value' %
+                        func_sym.decl_str(), func_sym)
+                self.asm_out('RET')
+        except PccError as e:
+            self.log_error(e, context_func_sym=func_sym)
+        finally:
+            self.pop_scope()
+            self.asm_out = prev_asm_out
+            self.context_func_sym = None
+        return func_sym
 
-    def compile_unary_op(self, node):
+    def compile_statement(self, node):
+        ast_class_name = node.__class__.__name__
+        compile_method = getattr(self, 'compile_%s_node' % ast_class_name, None)
+        if not callable(compile_method):
+            raise PccError(node, '%s: unsupported statement syntax' % ast_class_name)
+        return compile_method(node)
+
+    def compile_UnaryOp_node(self, node):
         if node.op in ('++', '--', 'p++', 'p--') and isinstance(node.expr, c_ast.ID):
             reg_sym = self.find_symbol(node.expr.name, filter=VariableSymbol)
             if reg_sym is None:
@@ -969,8 +819,9 @@ class Pcc:
                 pass
         else:
             raise PccError(node, 'unsupported unary operator "%s"' % node.op)
+        return False
 
-    def compile_binary_op(self, node):
+    def compile_BinaryOp_node(self, node):
         is_helper_op = node.op in VM_BINARY_LOGICAL_OP
         if node.op not in VM_BINARY_ARITHMETIC_OP and not is_helper_op:
             raise PccError(node, 'unsupported binary operator "%s"' % node.op)
@@ -993,8 +844,113 @@ class Pcc:
                 self.compile_helper_function_call(node.right, operator) ## A := A <OP> SCR0, F := undefined!
             else:
                 self.asm_out(operator, SCR0)        ## A := A <OP> SCR0, F := A
+        return False
 
-    def compile_if(self, node):
+    def compile_Decl_node(self, node):
+        accepted = False
+        if len(node.align) == 0 and node.bitsize is None and len(node.funcspec) == 0:
+            is_extern = False
+            if len(node.storage) > 0:
+                is_extern = len(node.storage) == 1 and node.storage[0] == 'extern'
+                if not is_extern:
+                    raise PccError(node, 'unsupported storage qualifier "%s"' % ' '.join(node.storage))
+            decl_type = node.type
+            if isinstance(decl_type, c_ast.TypeDecl):
+                var_name = decl_type.declname
+                self.try_parse_int_decl(decl_type, accept_void=False)
+                if len(decl_type.quals) != 0:
+                    raise PccError(node, 'unsupported type qualifier "%s"' % ' '.join(decl_type.quals))
+                if is_extern:
+                    var_sym = self.declare_parameter(node, var_name)
+                else:
+                    var_sym = self.declare_variable(node, var_name)
+                if node.init is not None:
+                    self.compile_assignment(var_sym.asm_repr(), node.init)
+                accepted = True
+            elif isinstance(decl_type, c_ast.FuncDecl):
+                self.declare_function(node, is_vm_func=is_extern)
+                accepted = True
+            elif isinstance(decl_type, c_ast.Enum):
+                self.declare_enum(decl_type)
+                accepted = True
+        if not accepted:
+            raise PccError(node, 'unsupported declaration syntax')
+        return False
+
+    def compile_Assignment_node(self, node):
+        lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
+        if lhs_sym is None:
+            raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
+        lhs_reg = lhs_sym.asm_repr()
+        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op)
+        return False
+
+    def compile_FuncCall_node(self, node, dst_reg=None):
+        func_name = node.name.name
+        func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
+        if func_sym is None:
+            raise PccError(node, 'function "%s" undeclared' % func_name)
+        elif dst_reg is not None and not func_sym.has_return:
+            raise PccError(node, 'function "%s" declared without return value' % func_sym.decl_str())
+        if isinstance(func_sym, VmApiFunctionSymbol):
+            ## compile call to VM API function
+            args = []
+            for i_arg in range(func_sym.arg_count):
+                arg_expr_node = node.args.exprs[i_arg]
+                arg_term = func_sym.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
+                if arg_term is None:
+                    arg_term = self.try_parse_term(arg_expr_node)
+                if arg_term is None:
+                    arg_term = ARG_REGS[i_arg]
+                    self.compile_assignment(arg_term, arg_expr_node)
+                args.append(arg_term)
+            self.asm_out(func_sym.vm_func_cmd, *args)
+        else:   ## isinstance(func_sym, ProgramFunctionSymbol)
+            ## compile call to program function: assign function argument values to their VM variables
+            for i_arg in range(func_sym.arg_count):
+                arg_asm_var = func_sym.arg_vars[i_arg]
+                arg_expr = node.args.exprs[i_arg]
+                self.compile_assignment(arg_asm_var, arg_expr)
+            self.asm_out('CALL', func_sym.asm_tag, comment=func_name + '()')
+            func_sym.has_caller = True
+        if dst_reg is not None:
+            self.asm_out('STA', dst_reg)
+        return False
+
+    def compile_Compound_node(self, node):
+        terminated = False
+        if node.block_items is not None:
+            prev_terminated = False
+            self.push_scope()
+            try:
+                for statement_node in node.block_items:
+                    if prev_terminated:
+                        if isinstance(statement_node, c_ast.Label):
+                            prev_terminated = False
+                        else:
+                            self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
+                            break
+                    prev_terminated = self.compile_statement(statement_node)
+                terminated = prev_terminated
+            finally:
+                self.pop_scope()
+        return terminated
+
+    def compile_Return_node(self, node):
+        ret_val_expected = self.context_func_sym.has_return
+        ret_val_given = node.expr is not None
+        if ret_val_given and not ret_val_expected:
+            self.log_warning(node, 'function "%s" should not return a value' %
+                self.context_func_sym.decl_str(), self.context_func_sym)
+        elif not ret_val_given and ret_val_expected:
+            self.log_warning(node, 'function "%s" should return a value' %
+                self.context_func_sym.decl_str(), self.context_func_sym)
+        elif ret_val_given:
+            self.compile_expression(node.expr)
+        self.asm_out('RET')
+        return True
+
+    def compile_If_node(self, node):
         else_tag = AsmTag() if node.iffalse is not None else None
         endif_tag = AsmTag()
         self.compile_expression(node.cond)          ## A := compile(expr)
@@ -1013,7 +969,7 @@ class Pcc:
         self.asm_out('TAG', endif_tag)              ## TAG: endif_tag
         return t1 and t2
 
-    def compile_while(self, node):
+    def compile_While_node(self, node):
         begin_tag = AsmTag()
         end_tag = AsmTag()
         self.push_loop_tags(begin_tag, end_tag)
@@ -1027,8 +983,9 @@ class Pcc:
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
             self.pop_loop_tags()
+        return False
 
-    def compile_do_while(self, node):
+    def compile_DoWhile_node(self, node):
         begin_tag = AsmTag()
         end_tag = AsmTag()
         self.push_loop_tags(begin_tag, end_tag)
@@ -1041,8 +998,9 @@ class Pcc:
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
             self.pop_loop_tags()
+        return False
 
-    def compile_for(self, node):
+    def compile_For_node(self, node):
         begin_tag = AsmTag()
         next_tag = AsmTag()
         end_tag = AsmTag()
@@ -1055,7 +1013,7 @@ class Pcc:
                 if node.init is not None:               ## compile init-clause statement(s)
                     if isinstance(node.init, c_ast.DeclList):
                         for decl_node in node.init.decls:
-                            self.compile_declaration(decl_node)
+                            self.compile_Decl_node(decl_node)
                     else:
                         self.compile_statement(node.init)
                 self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
@@ -1063,7 +1021,6 @@ class Pcc:
                     self.compile_expression(node.cond)  ## compile cond-expression, A := compile(cond)
                     self.asm_out('OR', 0)               ## assert F := A before conditional jump
                     self.asm_out('JZ', end_tag)         ## cond == FALSE => end_tag
-                print(node.stmt)
                 self.compile_statement(node.stmt)       ## compile loop-body statement(s)
                 self.asm_out('TAG', next_tag)           ## TAG: next_tag
                 if node.next is not None:               ## compile iteration-expression(s)
@@ -1079,6 +1036,34 @@ class Pcc:
                     self.pop_scope()
         finally:
             self.pop_loop_tags()
+        return False
+
+    def compile_Continue_node(self, node):
+        if self.loop_continue_tag is None:
+            raise PccError(node, '"continue" outside loop not allowed')
+        self.asm_out('JMP', self.loop_continue_tag)
+        return False
+
+    def compile_Break_node(self, node):
+        if self.loop_break_tag is None:
+            raise PccError(node, '"break" outside loop not allowed')
+        self.asm_out('JMP', self.loop_break_tag)
+        return False
+
+    def compile_Label_node(self, node):
+        label_sym = self.declare_or_get_label(node, node.name, set_defined=True)
+        self.asm_out('TAG', label_sym.asm_tag)
+        return self.compile_statement(node.stmt)
+
+    def compile_Goto_node(self, node):
+        label_sym = self.declare_or_get_label(node, node.name)
+        self.asm_out('JMP', label_sym.asm_tag)
+        return False
+
+    def compile_EmptyStatement_node(self, node):
+        return False
+
+    ## Helper functions
 
     def compile_helper_function_call(self, node, func_name):
         hlp_func = self.declare_helper_function(node, func_name)
