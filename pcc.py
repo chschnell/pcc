@@ -11,7 +11,7 @@ from pycparser import c_ast
 from pycparser.c_parser import CParser
 from pycparser.plyparser import ParseError
 
-SCR0     = 'v0'               ## General purpose register (SCRATCH 0)
+SCR0     = 'v0'               ## General purpose (scratch) register
 ARG_REGS = ('v1', 'v2', 'v3') ## Function argument register (ARG0 ... ARG2)
 
 VM_BINARY_ARITHMETIC_OP = {
@@ -139,8 +139,8 @@ class AsmVar:
         fqname = var_sym.cname
         if var_sym.context_func_sym is not None:
             fqname = '%s.%s' % (var_sym.context_func_sym.cname, fqname)
-        return '; %3s: %s:%s:%s: %s' % (self, PurePath(coord.file).name,
-            coord.line, coord.column, fqname)
+        return '; %3s: %s:%s:%s: %s %s' % (self, PurePath(coord.file).name,
+            coord.line, coord.column, var_sym.ctype, fqname)
 
 class AsmStatement:
     def __init__(self, comment=None):
@@ -301,11 +301,13 @@ class EnumSymbol(AbstractSymbol):
         return self.const_value
 
 class VariableSymbol(AbstractSymbol):
-    pass
+    def __init__(self, cname, ctype=None):
+        super().__init__(cname)
+        self.ctype = ctype
 
 class VmVariableSymbol(VariableSymbol):
-    def __init__(self, cname, decl_node, context_func_sym, asm_var):
-        super().__init__(cname)
+    def __init__(self, cname, decl_node, context_func_sym, asm_var, ctype=None):
+        super().__init__(cname, ctype=ctype)
         self.decl_node = decl_node
         self.context_func_sym = context_func_sym
         if asm_var is None:
@@ -320,8 +322,8 @@ class VmVariableSymbol(VariableSymbol):
         return self.asm_var
 
 class VmParameterSymbol(VariableSymbol):
-    def __init__(self, cname, vm_param_id):
-        super().__init__(cname)
+    def __init__(self, cname, vm_param_id, ctype=None):
+        super().__init__(cname, ctype=ctype)
         self.vm_param_id = vm_param_id
 
     def asm_repr(self):                 ## str vm_param_id, VM parameter name ("pN")
@@ -516,9 +518,13 @@ class Pcc:
 
     def encode_asm(self, use_comments=False, file=None):
         asm_lines = []
-        if use_comments and len(self.all_asm_vars) > 0:
+        if use_comments:
             asm_lines.append('; VM variables:')
             asm_lines.append(';')
+            asm_lines.append(';  v0: reserved (SCR0)')
+            asm_lines.append(';  v1: reserved (ARG0)')
+            asm_lines.append(';  v2: reserved (ARG1)')
+            asm_lines.append(';  v3: reserved (ARG2)')
             for asm_var in self.all_asm_vars:
                 asm_lines.append(asm_var.format_decl_comment())
         for asm_buf in self.all_buffers:
@@ -597,8 +603,8 @@ class Pcc:
                 enum_cursor = int(enum_value, 0) + 1
             self.bind_symbol(enum_node, EnumSymbol(enum_node.name, enum_value))
 
-    def declare_variable(self, node, cname, asm_var=None):
-        return self.bind_symbol(node, VmVariableSymbol(cname, node, self.context_func_sym, asm_var))
+    def declare_variable(self, node, ctype, cname, asm_var=None):
+        return self.bind_symbol(node, VmVariableSymbol(cname, node, self.context_func_sym, asm_var, ctype=ctype))
 
     def declare_parameter(self, node, cname):
         m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
@@ -765,7 +771,8 @@ class Pcc:
             if func_sym.arg_count > 0:
                 arg_vars = func_sym.arg_vars
                 for i_arg, arg_name in enumerate(func_sym.arg_names):
-                    self.declare_variable(node.body, arg_name, asm_var=arg_vars[i_arg])
+                    arg_ctype = node.decl.type.args.params[i_arg].type.type.names[0]
+                    self.declare_variable(node.body, arg_ctype, arg_name, asm_var=arg_vars[i_arg])
             terminated = self.compile_Compound_node(node.body)
             if not terminated:
                 if func_sym.has_return:
@@ -863,7 +870,8 @@ class Pcc:
                 if is_extern:
                     var_sym = self.declare_parameter(node, var_name)
                 else:
-                    var_sym = self.declare_variable(node, var_name)
+                    var_ctype = 'int' if isinstance(decl_type.type, c_ast.Enum) else decl_type.type.names[0]
+                    var_sym = self.declare_variable(node, var_ctype, var_name)
                 if node.init is not None:
                     self.compile_assignment(var_sym.asm_repr(), node.init)
                 accepted = True
@@ -1166,7 +1174,7 @@ class Pcc:
 
 ## ---------------------------------------------------------------------------
 
-def pcc(filenames, verbose=False, debug=False, do_reduce=True):
+def pcc(filenames, debug=False, do_reduce=True):
     VM_API_H = 'vm_api.h'
     if VM_API_H not in [PurePath(filename).name for filename in filenames]:
         filenames = [VM_API_H] + filenames
@@ -1180,8 +1188,6 @@ def pcc(filenames, verbose=False, debug=False, do_reduce=True):
     os.makedirs('cparser.out', exist_ok=True)
     cparser = CParser(taboutputdir='cparser.out')
     for filename in filenames:
-        if verbose:
-            print('reading %s...' % filename, file=sys.stderr)
         with open(filename, 'r') as f:
             c_source_lines = list(line.rstrip('\r\n') for line in f.readlines())
         c_source_files[filename] = c_source_lines
@@ -1189,8 +1195,6 @@ def pcc(filenames, verbose=False, debug=False, do_reduce=True):
         c_source = '\n'.join(c_source_lines)
         c_source = re.sub(r'//.*', '', c_source)
         c_source = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'.*', '', m.group(0)), c_source)
-        if verbose:
-            print('parsing %d lines...' % len(c_source_lines), file=sys.stderr)
         try:
             if ast is None:
                 ast = cparser.parse(c_source, filename)
@@ -1206,8 +1210,6 @@ def pcc(filenames, verbose=False, debug=False, do_reduce=True):
             return None
 
     cc = Pcc(c_source_files, debug)
-    if verbose:
-        print('compiling ast...', file=sys.stderr)
     if cc.compile(ast, do_reduce=do_reduce) != 0:
         print('*** aborted with compiler error(s)', file=sys.stderr)
         return None
@@ -1219,11 +1221,10 @@ def main():
     parser.add_argument('-o', metavar='FILE', help='place the output into FILE ("-" for STDOUT)')
     parser.add_argument('-c', dest='comments', action='store_true', help='add comments to asm output')
     parser.add_argument('-n', dest='no_reduce', action='store_true', help='do not reduce asm output')
-    parser.add_argument('-v', dest='verbose', action='store_true', help='generate verbose output')
     parser.add_argument('-d', dest='debug', action='store_true', help='add debug output to error messages')
     args = parser.parse_args()
 
-    cc = pcc(args.filenames, verbose=args.verbose, debug=args.debug, do_reduce=not args.no_reduce)
+    cc = pcc(args.filenames, debug=args.debug, do_reduce=not args.no_reduce)
     if cc is None:
         return -1
     out_filename = args.o

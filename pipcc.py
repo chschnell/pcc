@@ -23,10 +23,9 @@ def parse_parameter(param_str):
     return None
 
 class PiPcc:
-    def __init__(self, hostname=None, port=8888, verbose=False, do_reduce=True):
+    def __init__(self, hostname=None, port=8888, do_reduce=True):
         self.hostname = hostname
         self.port = port
-        self.verbose = verbose
         self.do_reduce = do_reduce
         self.out_parameter = None
         self.pi = None
@@ -129,7 +128,7 @@ class PiPcc:
 
     def compile_c_sources(self, c_filenames):
         self.log_message('compiling %s' % ' '.join(c_filenames))
-        cc = pcc(c_filenames, verbose=self.verbose, do_reduce=self.do_reduce)
+        cc = pcc(c_filenames, do_reduce=self.do_reduce)
         if cc is None:
             return None
         self.log_message('VM variables used: %d/150, tags: %d/50' % (cc.var_count, cc.tag_count))
@@ -145,10 +144,9 @@ def main():
     parser.add_argument('-o', dest='port', metavar='PORT', default=8888, help='port number of pigpiod (default: 8888)')
     parser.add_argument('-a', dest='assembler', action='store_true', help='treat input as assembly language file')
     parser.add_argument('-n', dest='no_reduce', action='store_true', help='do not reduce compiled asm code')
-    parser.add_argument('-v', dest='verbose', action='store_true', help='generate verbose output')
     args = parser.parse_args()
 
-    pipcc = PiPcc(hostname=args.hostname, port=args.port, verbose=args.verbose, do_reduce=not args.no_reduce)
+    pipcc = PiPcc(hostname=args.hostname, port=args.port, do_reduce=not args.no_reduce)
     try:
         if args.testsuite:
             result = pipcc.run_testsuite(args.filenames[0])
