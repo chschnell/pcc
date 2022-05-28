@@ -67,7 +67,7 @@ class PiPcc:
                     if timeout_sec is not None and time() - t1 > timeout_sec:
                         self.log_message('%s: script timed out, stopping...' % asm_filename)
                         break
-                    sleep(0.1)
+                    sleep(0.01)
                 status, p = pi.script_status(asm_sid)
                 if status != pigpio.PI_SCRIPT_HALTED:
                     self.log_message('%s: not terminated (status: %d), stopping...' % (asm_filename, status))
