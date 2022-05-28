@@ -121,9 +121,9 @@ def format_src_quote(c_source_files, filename, row, col):
 ## ---------------------------------------------------------------------------
 
 class AsmVar:
-    def __init__(self):
+    def __init__(self, var_sym=None):
         self.vm_var_id = None   ## None (unbound) or str "v0" ... "v149"
-        self.var_sym = None     ## None or VmVariableSymbol
+        self.var_sym = var_sym  ## VmVariableSymbol var_sym, 1:1 relationship
 
     def bind(self, vm_var_nr):
         self.vm_var_id = 'v%d' % vm_var_nr
@@ -301,29 +301,29 @@ class EnumSymbol(AbstractSymbol):
         return self.const_value
 
 class VariableSymbol(AbstractSymbol):
-    def __init__(self, cname, ctype=None):
+    def __init__(self, ctype, cname):
         super().__init__(cname)
         self.ctype = ctype
 
 class VmVariableSymbol(VariableSymbol):
-    def __init__(self, cname, decl_node, context_func_sym, asm_var, ctype=None):
-        super().__init__(cname, ctype=ctype)
+    def __init__(self, ctype, cname, decl_node, context_func_sym, asm_var):
+        super().__init__(ctype, cname)
         self.decl_node = decl_node
         self.context_func_sym = context_func_sym
         if asm_var is None:
-            self.asm_var = AsmVar()
+            self.asm_var = AsmVar(var_sym=self)
         else:
             if asm_var.var_sym is not None:
-                raise Exception('internal error: function argument\'s asm_var is already assigned a var_sym')
+                raise Exception('internal error: AsmVar is already bound to a VariableSymbol')
             self.asm_var = asm_var
-        self.asm_var.var_sym = self
+            asm_var.var_sym = self
 
     def asm_repr(self):                 ## AsmVar asm_var, str() expands to VM variable name ("vN")
         return self.asm_var
 
 class VmParameterSymbol(VariableSymbol):
-    def __init__(self, cname, vm_param_id, ctype=None):
-        super().__init__(cname, ctype=ctype)
+    def __init__(self, ctype, cname, vm_param_id):
+        super().__init__(ctype, cname)
         self.vm_param_id = vm_param_id
 
     def asm_repr(self):                 ## str vm_param_id, VM parameter name ("pN")
@@ -521,10 +521,10 @@ class Pcc:
         if use_comments:
             asm_lines.append('; VM variables:')
             asm_lines.append(';')
-            asm_lines.append(';  v0: reserved (SCR0)')
-            asm_lines.append(';  v1: reserved (ARG0)')
-            asm_lines.append(';  v2: reserved (ARG1)')
-            asm_lines.append(';  v3: reserved (ARG2)')
+            asm_lines.append(';  v0: reserved: SCR0')
+            asm_lines.append(';  v1: reserved: ARG0')
+            asm_lines.append(';  v2: reserved: ARG1')
+            asm_lines.append(';  v3: reserved: ARG2')
             for asm_var in self.all_asm_vars:
                 asm_lines.append(asm_var.format_decl_comment())
         for asm_buf in self.all_buffers:
@@ -604,14 +604,14 @@ class Pcc:
             self.bind_symbol(enum_node, EnumSymbol(enum_node.name, enum_value))
 
     def declare_variable(self, node, ctype, cname, asm_var=None):
-        return self.bind_symbol(node, VmVariableSymbol(cname, node, self.context_func_sym, asm_var, ctype=ctype))
+        return self.bind_symbol(node, VmVariableSymbol(ctype, cname, node, self.context_func_sym, asm_var))
 
-    def declare_parameter(self, node, cname):
+    def declare_parameter(self, node, ctype, cname):
         m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
         if not m:
             raise PccError(node, '%s: external variable names must contain one of "p0", "p1", ..., "p9"' % cname)
         vm_param_name = m.groups(0)[0]
-        return self.bind_symbol(node, VmParameterSymbol(cname, vm_param_name))
+        return self.bind_symbol(node, VmParameterSymbol(ctype, cname, vm_param_name))
 
     def declare_or_get_label(self, node, cname, set_defined=False):
         label_sym = self.find_symbol(cname, filter=LabelSymbol)
@@ -863,15 +863,15 @@ class Pcc:
                     raise PccError(node, 'unsupported storage qualifier "%s"' % ' '.join(node.storage))
             decl_type = node.type
             if isinstance(decl_type, c_ast.TypeDecl):
-                var_name = decl_type.declname
+                var_cname = decl_type.declname
                 self.try_parse_int_decl(decl_type, accept_void=False)
                 if len(decl_type.quals) != 0:
                     raise PccError(node, 'unsupported type qualifier "%s"' % ' '.join(decl_type.quals))
+                var_ctype = 'int' if isinstance(decl_type.type, c_ast.Enum) else decl_type.type.names[0]
                 if is_extern:
-                    var_sym = self.declare_parameter(node, var_name)
+                    var_sym = self.declare_parameter(node, var_ctype, var_cname)
                 else:
-                    var_ctype = 'int' if isinstance(decl_type.type, c_ast.Enum) else decl_type.type.names[0]
-                    var_sym = self.declare_variable(node, var_ctype, var_name)
+                    var_sym = self.declare_variable(node, var_ctype, var_cname)
                 if node.init is not None:
                     self.compile_assignment(var_sym.asm_repr(), node.init)
                 accepted = True
