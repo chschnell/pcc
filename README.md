@@ -27,7 +27,6 @@ Compiler command line arguments:
       -o FILE     place the output into FILE ("-" for STDOUT)
       -c          add comments to asm output
       -n          do not reduce asm output
-      -v          generate verbose output
       -d          add debug output to error messages
 
 Specify one or more `*.c` input files on the command line. The output filename defaults to the last `*.c` filename with extension `*.s` in the current working directory. Use command line argument `-o-` to write output to STDOUT.
@@ -63,7 +62,6 @@ Tool to compile, upload and execute a C program into a local or remote pigpiod V
       -o PORT       port number of pigpiod (default: 8888)
       -a            treat input as assembly language file
       -n            do not reduce compiled asm code
-      -v            generate verbose output
 
 This tool first uses `pcc.py` to compile one or more `*.c` input files and then uses pigpio's Python interface to upload and run the compiled assembly code on a pigpiod instance. If no pigpio hostname is specified the local pigpiod instance is connected. If a TIMEOUT value is specified the program is stopped in case it does not `HALT` by itself within this limit.
 
