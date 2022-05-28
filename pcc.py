@@ -11,11 +11,8 @@ from pycparser import c_ast
 from pycparser.c_parser import CParser
 from pycparser.plyparser import ParseError
 
-VM_API_H       = 'vm_api.h'
-SCR0           = 'v0'                  ## General purpose register (SCRATCH 0)
-ARG_REGS       = ('v1', 'v2', 'v3')    ## Function argument register (ARG0 ... ARG2)
-VARS_RESERVERD = len(ARG_REGS) + 1
-VM_BRANCH_CMDS = ('CALL', 'JM', 'JMP', 'JNZ', 'JP', 'JZ')
+SCR0     = 'v0'               ## General purpose register (SCRATCH 0)
+ARG_REGS = ('v1', 'v2', 'v3') ## Function argument register (ARG0 ... ARG2)
 
 VM_BINARY_ARITHMETIC_OP = {
     '+':  'ADD',    ## A+=x; F=A
@@ -136,6 +133,15 @@ class AsmVar:
             raise Exception('internal error: unbound virtual variable!')
         return self.vm_var_id
 
+    def format_decl_comment(self):
+        var_sym = self.var_sym
+        coord = var_sym.decl_node.coord
+        fqname = var_sym.cname
+        if var_sym.context_func_sym is not None:
+            fqname = '%s.%s' % (var_sym.context_func_sym.cname, fqname)
+        return '; %3s: %s:%s:%s: %s' % (self, PurePath(coord.file).name,
+            coord.line, coord.column, fqname)
+
 class AsmStatement:
     def __init__(self, comment=None):
         self.comment = comment  ## None or str, optional comment
@@ -160,14 +166,16 @@ class AsmTag(AsmStatement):
         return self.vm_tag_id
 
 class AsmCmd(AsmStatement):
-    def __init__(self, cmd, args, is_branch_cmd, comment):
+    def __init__(self, cmd, args, comment):
         super().__init__(comment=comment)
-        self.cmd = cmd                      ## str, uppercase assembly language command
-        self.args = args                    ## list(arg), command's arguments of type int, str, AsmVar or AsmTag
-        self.is_branch_cmd = is_branch_cmd  ## bool, True: cmd takes a single AsmTag argument
+        self.cmd = cmd          ## str, uppercase assembly language command
+        self.args = args        ## list(arg), command's arguments of type int, str, AsmVar or AsmTag
 
     def format_statement(self, indent):
         return '%s%-5s %s' % (indent, self.cmd, ' '.join([str(arg) for arg in self.args]))
+
+class AsmBranchCmd(AsmCmd):
+    pass
 
 class AsmBuffer:
     def __init__(self):
@@ -175,19 +183,22 @@ class AsmBuffer:
 
     def __call__(self, cmd, *args, comment=None):
         cmd = cmd.upper()
-        is_branch_cmd = cmd in VM_BRANCH_CMDS
-        if is_branch_cmd and (len(args) != 1 or not isinstance(args[0], AsmTag)):
-            raise Exception('internal error: %s expects AsmTag argument, given "%s"' % (cmd,' '.join(args)))
-        elif cmd == 'TAG':
-            asm_tag = args[0]
-            asm_tag.comment = comment
-            self.stmt_buf.append(asm_tag)
+        is_tag_cmd = cmd == 'TAG'
+        is_branch_cmd = cmd in ('CALL', 'JMP', 'JNZ', 'JZ', 'JP', 'JM')
+        if (is_branch_cmd or is_tag_cmd) and (len(args) != 1 or not isinstance(args[0], AsmTag)):
+            raise Exception('internal error: %s expects AsmTag argument, given "%s"' % (cmd, ' '.join(args)))
+        if is_tag_cmd:
+            asm_stmt = args[0]
+            asm_stmt.comment = comment
+        elif is_branch_cmd:
+            asm_stmt = AsmBranchCmd(cmd, list(args), comment)
         else:
-            self.stmt_buf.append(AsmCmd(cmd, list(args), is_branch_cmd, comment))
+            asm_stmt = AsmCmd(cmd, list(args), comment)
+        self.stmt_buf.append(asm_stmt)
 
     def _replace_tag(self, find_tag, replace_tag):
         for asm_cmd in self.stmt_buf:
-            if isinstance(asm_cmd, AsmCmd) and asm_cmd.is_branch_cmd and asm_cmd.args[0] is find_tag:
+            if isinstance(asm_cmd, AsmBranchCmd) and asm_cmd.args[0] is find_tag:
                 asm_cmd.args[0] = replace_tag
 
     def reduce(self):
@@ -232,7 +243,7 @@ class AsmBuffer:
         for asm_stmt in self.stmt_buf:
             if isinstance(asm_stmt, AsmTag) and asm_stmt not in tag_use_count:
                 tag_use_count[asm_stmt] = 0
-            elif isinstance(asm_stmt, AsmCmd) and asm_stmt.is_branch_cmd:
+            elif isinstance(asm_stmt, AsmBranchCmd):
                 asm_tag = asm_stmt.args[0]
                 if asm_tag not in tag_use_count:
                     tag_use_count[asm_tag] = 1
@@ -268,7 +279,7 @@ class AsmBuffer:
         for asm_stmt in self.stmt_buf:
             asm_line = asm_stmt.format_statement(indent)
             if use_comments and asm_stmt.comment is not None:
-                asm_line = '%-20s; %s' % (asm_line, asm_stmt.comment)
+                asm_line = '%-24s; %s' % (asm_line, asm_stmt.comment)
             asm_lines.append(asm_line)
         return asm_lines
 
@@ -362,7 +373,7 @@ class VmApiFunction_gpioSetPullUpDown(VmApiFunctionSymbol):
             if const_arg is None:
                 raise PccError(node, '%s: compile-time constant required for argument "%s"' % (
                     self.decl_str(), self.arg_names[i_arg]))
-            const_int = int(const_arg)
+            const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 2:
                 const_arg = 'ODU'[const_int]
         return const_arg
@@ -377,7 +388,7 @@ class VmApiFunction_gpioSetMode(VmApiFunctionSymbol):
             if const_arg is None:
                 raise PccError(node, '%s: compile-time constant required for argument "%s"' % (
                     self.decl_str(), self.arg_names[i_arg]))
-            const_int = int(const_arg)
+            const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 7:
                 const_arg = 'RW540123'[const_int]
         return const_arg
@@ -491,7 +502,7 @@ class Pcc:
             local_asm_vars = dict()
             for asm_buf in self.all_buffers:
                 asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
-            var_count = VARS_RESERVERD
+            var_count = len(ARG_REGS) + 1
             for asm_var in global_asm_vars.keys():
                 asm_var.bind(var_count)
                 var_count += 1
@@ -506,16 +517,10 @@ class Pcc:
     def encode_asm(self, use_comments=False, file=None):
         asm_lines = []
         if use_comments and len(self.all_asm_vars) > 0:
-            asm_lines.append('; Variables:')
+            asm_lines.append('; VM variables:')
             asm_lines.append(';')
             for asm_var in self.all_asm_vars:
-                var_sym = asm_var.var_sym
-                coord = var_sym.decl_node.coord
-                fqname = var_sym.cname
-                if var_sym.context_func_sym is not None:
-                    fqname = '%s.%s' % (var_sym.context_func_sym.cname, fqname)
-                asm_lines.append('; %3s: %s:%s:%s: int %s' % (asm_var,
-                    PurePath(coord.file).name, coord.line, coord.column, fqname))
+                asm_lines.append(asm_var.format_decl_comment())
         for asm_buf in self.all_buffers:
             if len(asm_lines) > 0:
                 asm_lines.append('')
@@ -577,8 +582,20 @@ class Pcc:
         scope.maps[0][sym_obj.cname] = sym_obj
         return sym_obj
 
-    def declare_enum(self, node, cname, enum_value):
-        return self.bind_symbol(node, EnumSymbol(cname, enum_value))
+    def declare_enum(self, enum_decl):
+        enum_cursor = 0
+        for enum_node in enum_decl.values.enumerators:
+            value_node = enum_node.value
+            if value_node is None:
+                enum_value = str(enum_cursor)
+                enum_cursor += 1
+            else:
+                const_value = self.try_parse_constant(value_node)
+                if const_value is None:
+                    raise PccError(value_node, 'unsupported enum syntax')
+                enum_value = const_value
+                enum_cursor = int(enum_value, 0) + 1
+            self.bind_symbol(enum_node, EnumSymbol(enum_node.name, enum_value))
 
     def declare_variable(self, node, cname, asm_var=None):
         return self.bind_symbol(node, VmVariableSymbol(cname, node, self.context_func_sym, asm_var))
@@ -653,18 +670,24 @@ class Pcc:
         return hlp_func
 
     def try_parse_int_decl(self, node, accept_void=True, accept_uint=False):
-        type_names = node.type.names
-        if len(type_names) == 1:
-            if type_names[0] == 'int':
-                return True
-            elif type_names[0] == 'void' and accept_void:
-                return False
-            elif type_names[0] == 'unsigned' and accept_uint:
-                return True
-        elif len(type_names) == 2:
-            if type_names[0] == 'unsigned' and type_names[1] == 'int' and accept_uint:
-                return True
-        raise PccError(node, 'unsupported data type "%s"' % (' '.join(type_names)))
+        if isinstance(node.type, c_ast.IdentifierType):
+            type_names = node.type.names
+            if len(type_names) == 1:
+                if type_names[0] == 'int':
+                    return True
+                elif type_names[0] == 'void' and accept_void:
+                    return False
+                elif type_names[0] == 'unsigned' and accept_uint:
+                    return True
+            elif len(type_names) == 2:
+                if type_names[0] == 'unsigned' and type_names[1] == 'int' and accept_uint:
+                    return True
+            raise PccError(node, 'unsupported data type "%s"' % (' '.join(type_names)))
+        elif isinstance(node.type, c_ast.Enum):
+            self.declare_enum(node.type)
+            return True
+        else:
+            raise PccError(node, 'unsupported int declaration type "%s"' % node.type)
 
     def try_parse_constant(self, node):
         result = None
@@ -719,19 +742,7 @@ class Pcc:
                 self.declare_function(node, is_vm_func=is_extern)
                 accepted = True
             elif isinstance(decl_type, c_ast.Enum):
-                enum_cursor = 0
-                for enum_node in decl_type.values.enumerators:
-                    value_node = enum_node.value
-                    if value_node is None:
-                        enum_value = str(enum_cursor)
-                        enum_cursor += 1
-                    else:
-                        const_value = self.try_parse_constant(value_node)
-                        if const_value is None:
-                            raise PccError(value_node, 'unsupported enum syntax')
-                        enum_value = const_value
-                        enum_cursor = int(enum_value, 0) + 1
-                    self.declare_enum(enum_node, enum_node.name, enum_value)
+                self.declare_enum(decl_type)
                 accepted = True
         if not accepted:
             raise PccError(node, 'unsupported declaration syntax')
@@ -1153,6 +1164,7 @@ class Pcc:
 ## ---------------------------------------------------------------------------
 
 def pcc(filenames, verbose=False, debug=False, do_reduce=True):
+    VM_API_H = 'vm_api.h'
     if VM_API_H not in [PurePath(filename).name for filename in filenames]:
         filenames = [VM_API_H] + filenames
     for filename in filenames:
