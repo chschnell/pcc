@@ -780,18 +780,17 @@ class Pcc:
 
     def compile_function_definition(self, node):
         func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
-        func_name = func_sym.cname                      ## str func_name
         func_sym.impl_node = node
         func_sym.parse_arg_names(node.decl)
-        ## compile function
+        ## enter function scope
+        self.context_func_sym = func_sym
         prev_asm_out = self.asm_out
         self.asm_out = func_sym.asm_out
-        self.context_func_sym = func_sym
         self.push_scope()
         try:
             func_sym.root_scope = self.scope
             self.asm_out('TAG', func_sym.asm_tag, comment=func_sym.decl_str())
-            ## bind function argument variables inside nested scope before function body
+            ## bind function argument variables to nested
             if func_sym.arg_count > 0:
                 arg_vars = func_sym.arg_vars
                 for i_arg, arg_name in enumerate(func_sym.arg_names):
@@ -1049,16 +1048,35 @@ class Pcc:
         end_tag = AsmTag()
         self.push_loop_tags(next_tag, end_tag)
         try:
-            self.compile_statement(node.init)       ## compile initialization statement(s)
-            self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
-            self.compile_expression(node.cond)      ## A := compile(expr)
-            self.asm_out('OR', 0)                   ## assert F := A before conditional jump
-            self.asm_out('JZ', end_tag)             ## expr == FALSE => end_tag
-            self.compile_statement(node.stmt)       ## compile body statement(s)
-            self.asm_out('TAG', next_tag)           ## TAG: next_tag
-            self.compile_statement(node.next)       ## compile next statement(s)
-            self.asm_out('JMP', begin_tag)          ## => begin_tag
-            self.asm_out('TAG', end_tag)            ## TAG: end_tag
+            needs_local_scope = node.init is not None and isinstance(node.init, c_ast.DeclList)
+            if needs_local_scope:
+                self.push_scope()
+            try:
+                if node.init is not None:               ## compile init-clause statement(s)
+                    if isinstance(node.init, c_ast.DeclList):
+                        for decl_node in node.init.decls:
+                            self.compile_declaration(decl_node)
+                    else:
+                        self.compile_statement(node.init)
+                self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
+                if node.cond is not None:
+                    self.compile_expression(node.cond)  ## compile cond-expression, A := compile(cond)
+                    self.asm_out('OR', 0)               ## assert F := A before conditional jump
+                    self.asm_out('JZ', end_tag)         ## cond == FALSE => end_tag
+                print(node.stmt)
+                self.compile_statement(node.stmt)       ## compile loop-body statement(s)
+                self.asm_out('TAG', next_tag)           ## TAG: next_tag
+                if node.next is not None:               ## compile iteration-expression(s)
+                    if isinstance(node.next, c_ast.ExprList):
+                        for expr_node in node.next.exprs:
+                            self.compile_expression(expr_node)
+                    else:
+                        self.compile_expression(node.next)
+                self.asm_out('JMP', begin_tag)          ## => begin_tag
+                self.asm_out('TAG', end_tag)            ## TAG: end_tag
+            finally:
+                if needs_local_scope:
+                    self.pop_scope()
         finally:
             self.pop_loop_tags()
 

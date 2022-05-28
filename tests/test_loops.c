@@ -80,6 +80,35 @@ int test_loop6()
     return a;
 }
 
+int test_loop7()
+{
+    int i = 0;
+
+    while (0) {
+        ++i;
+    }
+
+    if (i != 0) {
+        return -1;
+    }
+
+    do {
+        ++i;
+    } while (0);
+
+    if (i != 1) {
+        return -2;
+    }
+
+    for (;;) {
+        ++i;
+        if (i == 100) {
+            break;
+        }
+    }
+    return i;
+}
+
 void main()
 {
     p0 = test_loop1();
@@ -88,4 +117,5 @@ void main()
     p3 = test_loop4();
     p4 = test_loop5();
     p5 = test_loop6();
+    p6 = test_loop7();
 }
