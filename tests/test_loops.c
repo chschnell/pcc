@@ -87,7 +87,6 @@ int test_loop7()
     while (0) {
         ++i;
     }
-
     if (i != 0) {
         return -1;
     }
@@ -95,7 +94,6 @@ int test_loop7()
     do {
         ++i;
     } while (0);
-
     if (i != 1) {
         return -2;
     }
@@ -106,7 +104,37 @@ int test_loop7()
             break;
         }
     }
-    return i;
+    if (i != 100) {
+        return -3;
+    }
+
+    int z = 0;
+    for (int i=0; i<10; ++i) {
+        ++z;
+    }
+    if (z != 10) {
+        return -4;
+    }
+
+    z = 0;
+    for (int j=0; j<10; ++j) {
+        ++z;
+    }
+    if (z != 10) {
+        return -5;
+    }
+
+    i = 0;
+    z = 0;
+    for (int j=0, k=100; j<=20; ++j, ++k) {
+        i = j;
+        z = k;
+    }
+    if ((i != 20) || (z != 120)) {
+        return -7;
+    }
+
+    return 1;
 }
 
 void main()
