@@ -3,12 +3,13 @@
 
 void goto_label_test1(void)
 {
+    int i = 0;
+
     p0 = 1;
     goto main_start;
     p0 = -1;
     goto done;
 
-    int i = 0;
     {
 main_start:
         p1 = 2;
