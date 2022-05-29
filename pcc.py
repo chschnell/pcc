@@ -28,27 +28,27 @@ VM_BINARY_ARITHMETIC_OP = {
 }
 
 VM_BINARY_LOGICAL_OP = {
-    '&&': 'ANDL',   ## A=(A && SCR0); F=A; A:(0|1)
-    '||': 'ORL',    ## A=(A || SCR0); F=A; A:(0|1)
-    '==': 'EQ',     ## A=(A == SCR0); F=A; A:(0|1)
-    '!=': 'NE',     ## A=(A != SCR0); F=A; A:(0|1)
-    '>':  'GT',     ## A=(A  > SCR0); F=A; A:(0|1)
-    '>=': 'GE',     ## A=(A >= SCR0); F=A; A:(0|1)
-    '<':  'LT',     ## A=(A  < SCR0); F=A; A:(0|1)
-    '<=': 'LE',     ## A=(A <= SCR0); F=A; A:(0|1)
+    '&&': 'ANDL',   ## A=(A && SCR0); A:(0|1)
+    '||': 'ORL',    ## A=(A || SCR0); A:(0|1)
+    '==': 'EQ',     ## A=(A == SCR0); A:(0|1)
+    '!=': 'NE',     ## A=(A != SCR0); A:(0|1)
+    '>':  'GT',     ## A=(A  > SCR0); A:(0|1)
+    '>=': 'GE',     ## A=(A >= SCR0); A:(0|1)
+    '<':  'LT',     ## A=(A  < SCR0); A:(0|1)
+    '<=': 'LE',     ## A=(A <= SCR0); A:(0|1)
 }
 
 HELPER_FUNCTION_DESCR = {
     'NEG':  'NEG(): A=-A; F=A',
-    'NOTL': 'NOTL(): A=!A; F=A; A:(0|1)',
-    'ANDL': 'ANDL(): A=(A && SCR0); F=A; A:(0|1)',
-    'ORL':  'ORL(): A=(A || SCR0); F=A; A:(0|1)',
-    'EQ':   'EQ(): A=(A == SCR0); F=A; A:(0|1)',
-    'NE':   'NE(): A=(A != SCR0); F=A; A:(0|1)',
-    'GT':   'GT(): A=(A > SCR0); F=A; A:(0|1)',
-    'GE':   'GE(): A=(A >= SCR0); F=A; A:(0|1)',
-    'LT':   'LT(): A=(A < SCR0); F=A; A:(0|1)',
-    'LE':   'LE(): A=(A <= SCR0); F=A; A:(0|1)',
+    'NOTL': 'NOTL(): A=!A; A:(0|1)',
+    'ANDL': 'ANDL(): A=(A && SCR0); A:(0|1)',
+    'ORL':  'ORL(): A=(A || SCR0); A:(0|1)',
+    'EQ':   'EQ(): A=(A == SCR0); A:(0|1)',
+    'NE':   'NE(): A=(A != SCR0); A:(0|1)',
+    'GT':   'GT(): A=(A > SCR0); A:(0|1)',
+    'GE':   'GE(): A=(A >= SCR0); A:(0|1)',
+    'LT':   'LT(): A=(A < SCR0); A:(0|1)',
+    'LE':   'LE(): A=(A <= SCR0); A:(0|1)',
 }
 
 VM_FUNCTION_CMD = {
@@ -340,23 +340,31 @@ class LabelSymbol(AbstractSymbol):
         return self.asm_tag
 
 class FunctionSymbol(AbstractSymbol):
-    def __init__(self, cname, has_return, arg_count):
+    def __init__(self, cname, prototype):
         super().__init__(cname)
-        self.has_return = has_return    ## bool, True: function returns a value
-        self.arg_count = arg_count      ## int, number of function arguments
-        self.arg_names = []             ## list(str), argument names from implementation's declaration
-
-    def parse_arg_names(self, decl):    ## c_ast.Decl decl: function declaration
-        if self.arg_count > 0:
-            self.arg_names = [p.name for p in decl.type.args.params]
+        self.prototype = prototype
 
     def decl_str(self):
-        return '%s %s(%s)' % ('int' if self.has_return else 'void',
-            self.cname, ', '.join(['int ' + n for n in self.arg_names]))
+        return '%s %s(%s)' % (self.prototype.ret_ctype, self.cname, ', '.join(self.prototype.arg_ctypes))
+
+class ProgramFunctionSymbol(FunctionSymbol):
+    def __init__(self, cname, prototype, decl_node):
+        super().__init__(cname, prototype)
+        self.decl_node = decl_node      ## c_ast.Decl, first declaration's node
+        self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
+        self.root_scope = None          ## ChainMap, function's root scope
+        self.has_caller = False         ## bool, True: function has at least one caller
+        self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
+        self.asm_buf = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
+        self.arg_vars = [               ## list(AsmVar), function argument VM variables
+            AsmVar() for i in range(prototype.arg_count)]
+
+    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to function entry point's TAG
+        return self.asm_tag
 
 class VmApiFunctionSymbol(FunctionSymbol):
-    def __init__(self, cname, has_return, arg_count, vm_func_cmd):
-        super().__init__(cname, has_return, arg_count)
+    def __init__(self, cname, prototype, vm_func_cmd):
+        super().__init__(cname, prototype)
         self.vm_func_cmd = vm_func_cmd
 
     def asm_repr(self):                 ## str vm_func_cmd, VM's special function command name
@@ -373,8 +381,7 @@ class VmApiFunction_gpioSetPullUpDown(VmApiFunctionSymbol):
             ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
             ##   PUD g p  | "O"        | "D"         | "U"
             if const_arg is None:
-                raise PccError(node, '%s: compile-time constant required for argument "%s"' % (
-                    self.decl_str(), self.arg_names[i_arg]))
+                raise PccError(node, '%s: compile-time constant required for 2nd argument' % self.decl_str())
             const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 2:
                 const_arg = 'ODU'[const_int]
@@ -388,33 +395,53 @@ class VmApiFunction_gpioSetMode(VmApiFunctionSymbol):
             ##   vm_api.h  | PI_INPUT | PI_OUTPUT | PI_ALT5 | PI_ALT4 | PI_ALT0 | PI_ALT1 | PI_ALT2 | PI_ALT3
             ##   MODES g m | "R"      | "W"       | "5"     | "4"     | "0"     | "1"     | "2"     | "3"
             if const_arg is None:
-                raise PccError(node, '%s: compile-time constant required for argument "%s"' % (
-                    self.decl_str(), self.arg_names[i_arg]))
+                raise PccError(node, '%s: compile-time constant required for 2nd argument' % self.decl_str())
             const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 7:
                 const_arg = 'RW540123'[const_int]
         return const_arg
 
-class ProgramFunctionSymbol(FunctionSymbol):
-    def __init__(self, cname, has_return, arg_count, decl_node):
-        super().__init__(cname, has_return, arg_count)
-        self.decl_node = decl_node      ## c_ast.Decl, first declaration's node
-        self.has_caller = False         ## bool, True: function has at least one caller
-        self.root_scope = None          ## ChainMap, function's root scope
-        self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
-        self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
-        self.asm_out = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
-        self.arg_vars = [               ## list(AsmVar), function argument VM variables
-            AsmVar() for i in range(arg_count)]
-
-    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to function entry point's TAG
-        return self.asm_tag
-
 class HelperFunction:
     def __init__(self, func_name):
         self.func_name = func_name      ## str, internal helper function name
         self.asm_tag = AsmTag()         ## AsmTag, helper function entry point's TAG
-        self.asm_out = AsmBuffer()      ## AsmBuffer, helper function implementation's statement buffer
+        self.asm_buf = AsmBuffer()      ## AsmBuffer, helper function implementation's statement buffer
+
+class FunctionPrototype:
+    def __init__(self, decl_node, is_extern):
+        arg_ctypes = []
+        func_args = decl_node.type.args
+        if func_args is not None and not (len(func_args.params) == 1 and
+                self._parse_ctype(func_args.params[0].type, accept_void=True, accept_uint=is_extern) == 'void'):
+            for arg in func_args.params:
+                arg_ctypes.append(self._parse_ctype(arg.type, accept_uint=is_extern))
+        self.is_extern = is_extern
+        self.ret_ctype = self._parse_ctype(decl_node.type.type, accept_void=True, accept_uint=is_extern)
+        self.arg_ctypes = arg_ctypes
+        self.arg_count = len(arg_ctypes)
+        self.has_return = self.ret_ctype != 'void'
+
+    def matches(self, other):
+        return self.is_extern == other.is_extern and \
+               self.arg_ctypes == other.arg_ctypes and \
+               self.ret_ctype == other.ret_ctype
+
+    def _parse_ctype(self, node, accept_void=False, accept_uint=False):
+        if isinstance(node.type, c_ast.IdentifierType):
+            type_names = node.type.names
+            if len(type_names) == 1:
+                type_name = type_names[0]
+                if type_name in ('int', 'long'):
+                    return type_name
+                elif accept_void and type_name == 'void':
+                    return type_name
+                elif accept_uint and type_name == 'unsigned':
+                    return type_name
+            elif len(type_names) == 2:
+                if accept_uint and type_names[0] == 'unsigned' and type_names[1] in ('int', 'long'):
+                    return ' '.join(type_names)
+            raise PccError(node.type, 'unsupported type "%s"' % ' '.join(type_names))
+        raise PccError(node.type, 'unsupported type')
 
 ## ---------------------------------------------------------------------------
 
@@ -425,7 +452,8 @@ class Pcc:
         self.error_count = 0                ## int, error counter
         self.var_count = None               ## int, number of VM variables allocated
         self.tag_count = None               ## int, number of VM tags allocated
-        self.asm_out = AsmBuffer()          ## AsmBuffer, current output buffer, initialized with init seg
+        self.asm_buf = AsmBuffer()          ## AsmBuffer, root output buffer
+        self.asm_out = self.asm_buf         ## AsmBuffer, current output buffer
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
         self.context_func_sym = None        ## None or ProgramFunctionSymbol, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
@@ -434,7 +462,7 @@ class Pcc:
         self.declared_prog_func = set()     ## set(ProgramFunctionSymbol func_sym), all declared program functions
         self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
         self.log_error_location = None      ## most recent reported error location
-        self.all_buffers = None             ## list(AsmBuf asm_buf, ...), list of all buffers
+        self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
         self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
 
     def compile(self, root_node, do_reduce=True):
@@ -451,67 +479,65 @@ class Pcc:
                     raise PccError(node, 'unsupported syntax')
             except PccError as e:
                 self.log_error(e)
-
-        ## find main() program function
+        ## check user defined functions
         main_func = self.find_symbol('main', filter=ProgramFunctionSymbol)
         if main_func is None:
             self.log_error(PccError(None, 'missing main() function implementation'))
         else:
             main_func.has_caller = True
-
         for prog_func in self.declared_prog_func:
             if prog_func.has_caller and prog_func.impl_node is None:
-                ## check that all called program functions are actually defined
+                ## check that all called user defined functions are actually defined
                 self.log_error(PccError(prog_func.decl_node,
                     'function "%s" declared without implementation' % prog_func.cname))
             elif not prog_func.has_caller:
                 ## drop unused functions
                 prog_functions.remove(prog_func)
             else:
-                ## check that all used labels within program functions are defined
+                ## check that all used labels within user defined functions are defined
                 for label_sym in prog_func.root_scope.maps[0].values():
                     if isinstance(label_sym, LabelSymbol) and not label_sym.is_defined:
                         self.log_error(PccError(label_sym.decl_node,
                             'label "%s" undefined' % label_sym.cname))
-
         if self.error_count == 0:
             ## append main() CALL to init segment
-            self.asm_out('CALL', main_func.asm_tag, comment='main()')
-            self.asm_out('HALT')
+            self.asm_buf('CALL', main_func.asm_tag, comment='main()')
+            self.asm_buf('HALT')
             ## compile helper functions
             self.compile_helper_function_impl()
             all_functions = prog_functions + list(self.helper_functions.values())
-            self.all_buffers = [self.asm_out] + [f.asm_out for f in all_functions]
+            self.all_asm_bufs = [self.asm_buf] + [f.asm_buf for f in all_functions]
             ## drop unused tags in program functions
-            tags = dict()   ## dict(AsmTag asm_tag: int use_count), preseeded with program and helper function tags
+            tags = dict() ## dict(AsmTag asm_tag: int use_count), preseed w. program/helper functions
             for func_sym in all_functions:
                 tags[func_sym.asm_tag] = 1
             for func in prog_functions:
-                func.asm_out.drop_unused_tags(tags.copy())
+                func.asm_buf.drop_unused_tags(tags.copy())
             ## reduce program functions
             if do_reduce:
                 for func in prog_functions:
-                    func.asm_out.reduce()
+                    func.asm_buf.reduce()
             ## bind VM tags
-            self.tag_count = 0
-            vm_tag_offset = 10
+            tag_count = 0
+            tag_cursor = 10
             for func in all_functions:
-                n_tags = func.asm_out.allocate_vm_tags(vm_tag_offset)
-                vm_tag_offset = ((vm_tag_offset + n_tags + 10) // 10) * 10
-                self.tag_count += n_tags
+                n_tags = func.asm_buf.allocate_vm_tags(tag_cursor)
+                tag_count += n_tags
+                tag_cursor = ((tag_cursor + n_tags + 10) // 10) * 10
+            self.tag_count = tag_count
             ## bind VM variables
             global_asm_vars = dict()
             local_asm_vars = dict()
-            for asm_buf in self.all_buffers:
+            for asm_buf in self.all_asm_bufs:
                 asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
-            var_count = len(ARG_REGS) + 1
+            var_cursor = 1 + len(ARG_REGS)
             for asm_var in global_asm_vars.keys():
-                asm_var.bind(var_count)
-                var_count += 1
+                asm_var.bind(var_cursor)
+                var_cursor += 1
             for asm_var in local_asm_vars.keys():
-                asm_var.bind(var_count)
-                var_count += 1
-            self.var_count = var_count
+                asm_var.bind(var_cursor)
+                var_cursor += 1
+            self.var_count = var_cursor
             self.all_asm_vars = list(global_asm_vars.keys())
             self.all_asm_vars.extend(local_asm_vars.keys())
         return self.error_count
@@ -527,7 +553,7 @@ class Pcc:
             asm_lines.append(';  v3: reserved: ARG2')
             for asm_var in self.all_asm_vars:
                 asm_lines.append(asm_var.format_decl_comment())
-        for asm_buf in self.all_buffers:
+        for asm_buf in self.all_asm_bufs:
             if len(asm_lines) > 0:
                 asm_lines.append('')
             asm_lines.extend(asm_buf.format_statements('    ', use_comments))
@@ -623,47 +649,37 @@ class Pcc:
             label_sym.is_defined = True
         return label_sym
 
-    def declare_function(self, node, is_vm_func=False):
+    def declare_function(self, node, is_extern=False):
         func_name = node.name
-        has_return = self.try_parse_int_decl(node.type.type, accept_uint=is_vm_func)
-        ## parse function arguments
-        arg_count = 0
-        args = node.type.args
-        if args is not None and self.try_parse_int_decl(args.params[0].type, accept_uint=is_vm_func):
-            for arg in args.params:
-                self.try_parse_int_decl(arg.type, accept_void=False, accept_uint=is_vm_func)
-            arg_count = len(args.params)
-        ## check main() special constraints
+        prototype = FunctionPrototype(node, is_extern)
+        ## check main() prototype constraints
         if func_name == 'main':
-            if has_return:
+            if prototype.has_return:
                 raise PccError(node, 'return type other than "void" is not supported for main()')
-            elif arg_count > 0:
+            elif prototype.arg_count > 0:
                 raise PccError(node, 'function arguments are not supported for main()')
-        ## check possible function prototype redeclaration
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is not None:
-            sym_is_vm_func = isinstance(func_sym, VmApiFunctionSymbol)
-            if sym_is_vm_func != is_vm_func or \
-                    func_sym.has_return != has_return or \
-                    func_sym.arg_count != arg_count:
+            ## check for function prototype redeclaration
+            if not prototype.matches(func_sym.prototype):
                 raise PccError(node, 'function prototype conflicts with previous declaration')
             return func_sym
-        ## bind function declaration to current scope
-        if is_vm_func:
-            if func_name not in VM_FUNCTION_CMD:
-                raise PccError(node, 'unknown VM function name "%s"' % func_name)
-            vm_func_cmd = VM_FUNCTION_CMD[func_name]
-            if func_name == 'gpioSetPullUpDown':
-                func_sym = VmApiFunction_gpioSetPullUpDown(func_name, has_return, arg_count, vm_func_cmd)
-            elif func_name == 'gpioSetMode':
-                func_sym = VmApiFunction_gpioSetMode(func_name, has_return, arg_count, vm_func_cmd)
-            else:
-                func_sym = VmApiFunctionSymbol(func_name, has_return, arg_count, vm_func_cmd)
-            func_sym.parse_arg_names(node)
         else:
-            func_sym = ProgramFunctionSymbol(func_name, has_return, arg_count, node)
-            self.declared_prog_func.add(func_sym)
-        return self.bind_symbol(node, func_sym)
+            ## create function symbol and bind to current scope
+            if is_extern:
+                if func_name not in VM_FUNCTION_CMD:
+                    raise PccError(node, 'unknown VM function name "%s"' % func_name)
+                vm_func_cmd = VM_FUNCTION_CMD[func_name]
+                if func_name == 'gpioSetPullUpDown':
+                    func_sym = VmApiFunction_gpioSetPullUpDown(func_name, prototype, vm_func_cmd)
+                elif func_name == 'gpioSetMode':
+                    func_sym = VmApiFunction_gpioSetMode(func_name, prototype, vm_func_cmd)
+                else:
+                    func_sym = VmApiFunctionSymbol(func_name, prototype, vm_func_cmd)
+            else:
+                func_sym = ProgramFunctionSymbol(func_name, prototype, node)
+                self.declared_prog_func.add(func_sym)
+            return self.bind_symbol(node, func_sym)
 
     def declare_helper_function(self, node, func_name):
         if func_name in self.helper_functions:
@@ -674,26 +690,6 @@ class Pcc:
             hlp_func = HelperFunction(func_name)
             self.helper_functions[func_name] = hlp_func
         return hlp_func
-
-    def try_parse_int_decl(self, node, accept_void=True, accept_uint=False):
-        if isinstance(node.type, c_ast.IdentifierType):
-            type_names = node.type.names
-            if len(type_names) == 1:
-                if type_names[0] == 'int':
-                    return True
-                elif type_names[0] == 'void' and accept_void:
-                    return False
-                elif type_names[0] == 'unsigned' and accept_uint:
-                    return True
-            elif len(type_names) == 2:
-                if type_names[0] == 'unsigned' and type_names[1] == 'int' and accept_uint:
-                    return True
-            raise PccError(node, 'unsupported data type "%s"' % (' '.join(type_names)))
-        elif isinstance(node.type, c_ast.Enum):
-            self.declare_enum(node.type)
-            return True
-        else:
-            raise PccError(node, 'unsupported int declaration type "%s"' % node.type)
 
     def try_parse_constant(self, node):
         result = None
@@ -760,22 +756,24 @@ class Pcc:
     def compile_function_definition(self, node):
         func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
         func_sym.impl_node = node
-        func_sym.parse_arg_names(node.decl)
         self.context_func_sym = func_sym
-        prev_asm_out = self.asm_out
-        self.asm_out = func_sym.asm_out
+        self.asm_out = func_sym.asm_buf
         self.push_scope()
         try:
             func_sym.root_scope = self.scope
             self.asm_out('TAG', func_sym.asm_tag, comment=func_sym.decl_str())
-            if func_sym.arg_count > 0:
+            if func_sym.prototype.arg_count > 0:
                 arg_vars = func_sym.arg_vars
-                for i_arg, arg_name in enumerate(func_sym.arg_names):
-                    arg_ctype = node.decl.type.args.params[i_arg].type.type.names[0]
-                    self.declare_variable(node.body, arg_ctype, arg_name, asm_var=arg_vars[i_arg])
+                arg_ctypes = func_sym.prototype.arg_ctypes
+                for i_arg, arg_param in enumerate(node.decl.type.args.params):
+                    arg_ctype = arg_ctypes[i_arg]
+                    arg_cname = arg_param.name
+                    if arg_cname is None:
+                        arg_cname = '00_%s$%d' % (func_sym.cname, i_arg)
+                    self.declare_variable(node.body, arg_ctype, arg_cname, asm_var=arg_vars[i_arg])
             terminated = self.compile_Compound_node(node.body)
             if not terminated:
-                if func_sym.has_return:
+                if func_sym.prototype.has_return:
                     self.log_warning(node, 'function "%s" should return a value' %
                         func_sym.decl_str(), func_sym)
                 self.asm_out('RET')
@@ -783,7 +781,7 @@ class Pcc:
             self.log_error(e, context_func_sym=func_sym)
         finally:
             self.pop_scope()
-            self.asm_out = prev_asm_out
+            self.asm_out = self.asm_buf
             self.context_func_sym = None
         return func_sym
 
@@ -854,34 +852,39 @@ class Pcc:
         return False
 
     def compile_Decl_node(self, node):
-        accepted = False
-        if len(node.align) == 0 and node.bitsize is None and len(node.funcspec) == 0:
-            is_extern = False
-            if len(node.storage) > 0:
-                is_extern = len(node.storage) == 1 and node.storage[0] == 'extern'
-                if not is_extern:
-                    raise PccError(node, 'unsupported storage qualifier "%s"' % ' '.join(node.storage))
-            decl_type = node.type
-            if isinstance(decl_type, c_ast.TypeDecl):
-                var_cname = decl_type.declname
-                self.try_parse_int_decl(decl_type, accept_void=False)
-                if len(decl_type.quals) != 0:
-                    raise PccError(node, 'unsupported type qualifier "%s"' % ' '.join(decl_type.quals))
-                var_ctype = 'int' if isinstance(decl_type.type, c_ast.Enum) else decl_type.type.names[0]
-                if is_extern:
-                    var_sym = self.declare_parameter(node, var_ctype, var_cname)
+        if len(node.align) != 0 or node.bitsize is not None or len(node.funcspec) != 0:
+            raise PccError(node, 'unsupported declaration syntax')
+        is_extern = False
+        if len(node.storage) > 0:
+            if len(node.storage) != 1 or node.storage[0] != 'extern':
+                raise PccError(node, 'unsupported storage qualifier "%s"' % ' '.join(node.storage))
+            is_extern = True
+        decl_type = node.type
+        if isinstance(decl_type, c_ast.TypeDecl):
+            if len(decl_type.quals) != 0:
+                raise PccError(node, 'unsupported type qualifier "%s"' % ' '.join(decl_type.quals))
+            if isinstance(decl_type.type, c_ast.IdentifierType):
+                if len(decl_type.type.names) == 1 and decl_type.type.names[0] in ('int', 'long'):
+                    var_ctype = decl_type.type.names[0]
                 else:
-                    var_sym = self.declare_variable(node, var_ctype, var_cname)
-                if node.init is not None:
-                    self.compile_assignment(var_sym.asm_repr(), node.init)
-                accepted = True
-            elif isinstance(decl_type, c_ast.FuncDecl):
-                self.declare_function(node, is_vm_func=is_extern)
-                accepted = True
-            elif isinstance(decl_type, c_ast.Enum):
-                self.declare_enum(decl_type)
-                accepted = True
-        if not accepted:
+                    raise PccError(node, 'unsupported variable type "%s"' % (' '.join(decl_type.type.names)))
+            elif isinstance(decl_type.type, c_ast.Enum):
+                self.declare_enum(decl_type.type)
+                var_ctype = 'int'
+            else:
+                raise PccError(decl_type, 'unsupported variable type')
+            var_cname = decl_type.declname
+            if is_extern:
+                var_sym = self.declare_parameter(node, var_ctype, var_cname)
+            else:
+                var_sym = self.declare_variable(node, var_ctype, var_cname)
+            if node.init is not None:
+                self.compile_assignment(var_sym.asm_repr(), node.init)
+        elif isinstance(decl_type, c_ast.FuncDecl):
+            self.declare_function(node, is_extern=is_extern)
+        elif isinstance(decl_type, c_ast.Enum):
+            self.declare_enum(decl_type)
+        else:
             raise PccError(node, 'unsupported declaration syntax')
         return False
 
@@ -894,16 +897,21 @@ class Pcc:
         return False
 
     def compile_FuncCall_node(self, node, dst_reg=None):
+        terminated = False
         func_name = node.name.name
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
             raise PccError(node, 'function "%s" undeclared' % func_name)
-        elif dst_reg is not None and not func_sym.has_return:
+        elif dst_reg is not None and not func_sym.prototype.has_return:
             raise PccError(node, 'function "%s" declared without return value' % func_sym.decl_str())
+        arg_count = len(node.args.exprs) if node.args is not None else 0
+        if func_sym.prototype.arg_count != arg_count:
+            raise PccError(node, 'function "%s" expects %d argument(s) instead of %d' % (
+                func_sym.decl_str(), func_sym.prototype.arg_count, arg_count))
         if isinstance(func_sym, VmApiFunctionSymbol):
             ## compile call to VM API function
             args = []
-            for i_arg in range(func_sym.arg_count):
+            for i_arg in range(func_sym.prototype.arg_count):
                 arg_expr_node = node.args.exprs[i_arg]
                 arg_term = func_sym.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
                 if arg_term is None:
@@ -912,18 +920,20 @@ class Pcc:
                     arg_term = ARG_REGS[i_arg]
                     self.compile_assignment(arg_term, arg_expr_node)
                 args.append(arg_term)
-            self.asm_out(func_sym.vm_func_cmd, *args)
-        else:   ## isinstance(func_sym, ProgramFunctionSymbol)
-            ## compile call to program function: assign function argument values to their VM variables
-            for i_arg in range(func_sym.arg_count):
+            if func_sym.vm_func_cmd == 'HALT':
+                terminated = True
+            self.asm_out(func_sym.vm_func_cmd, *args, comment='%s()' % func_name)
+        else:
+            ## compile call to user defined function
+            func_sym.has_caller = True
+            for i_arg in range(func_sym.prototype.arg_count):
                 arg_asm_var = func_sym.arg_vars[i_arg]
                 arg_expr = node.args.exprs[i_arg]
                 self.compile_assignment(arg_asm_var, arg_expr)
-            self.asm_out('CALL', func_sym.asm_tag, comment=func_name + '()')
-            func_sym.has_caller = True
+            self.asm_out('CALL', func_sym.asm_tag, comment='%s()' % func_name)
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
-        return False
+        return terminated
 
     def compile_Compound_node(self, node):
         terminated = False
@@ -945,7 +955,7 @@ class Pcc:
         return terminated
 
     def compile_Return_node(self, node):
-        ret_val_expected = self.context_func_sym.has_return
+        ret_val_expected = self.context_func_sym.prototype.has_return
         ret_val_given = node.expr is not None
         if ret_val_given and not ret_val_expected:
             self.log_warning(node, 'function "%s" should not return a value' %
@@ -962,7 +972,7 @@ class Pcc:
         else_tag = AsmTag() if node.iffalse is not None else None
         endif_tag = AsmTag()
         self.compile_expression(node.cond)          ## A := compile(expr)
-        self.asm_out('OR', 0)                       ## assert F := A before conditional jump
+        self.asm_out('OR', 0, comment='F=A')        ## assert F := A before conditional jump
         if else_tag is None:
             self.asm_out('JZ', endif_tag)           ## IF expr == FALSE AND no-else-branch GOTO endif_tag
         else:
@@ -984,7 +994,7 @@ class Pcc:
         try:
             self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
             self.compile_expression(node.cond)      ## A := compile(expr)
-            self.asm_out('OR', 0)                   ## assert F := A before conditional jump
+            self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             self.asm_out('JZ', end_tag)             ## expr == FALSE => end_tag
             self.compile_statement(node.stmt)       ## compile statement(s)
             self.asm_out('JMP', begin_tag)          ## => begin_tag
@@ -1001,7 +1011,7 @@ class Pcc:
             self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
             self.compile_statement(node.stmt)       ## compile statement(s)
             self.compile_expression(node.cond)      ## A := compile(expr)
-            self.asm_out('OR', 0)                   ## assert F := A before conditional jump
+            self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             self.asm_out('JNZ', begin_tag)          ## expr == TRUE => begin_tag
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
@@ -1027,7 +1037,7 @@ class Pcc:
                 self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
                 if node.cond is not None:
                     self.compile_expression(node.cond)  ## compile cond-expression, A := compile(cond)
-                    self.asm_out('OR', 0)               ## assert F := A before conditional jump
+                    self.asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
                     self.asm_out('JZ', end_tag)         ## cond == FALSE => end_tag
                 self.compile_statement(node.stmt)       ## compile loop-body statement(s)
                 self.asm_out('TAG', next_tag)           ## TAG: next_tag
@@ -1058,15 +1068,15 @@ class Pcc:
         self.asm_out('JMP', self.loop_break_tag)
         return False
 
-    def compile_Label_node(self, node):
-        label_sym = self.declare_or_get_label(node, node.name, set_defined=True)
-        self.asm_out('TAG', label_sym.asm_tag)
-        return self.compile_statement(node.stmt)
-
     def compile_Goto_node(self, node):
         label_sym = self.declare_or_get_label(node, node.name)
         self.asm_out('JMP', label_sym.asm_tag)
         return False
+
+    def compile_Label_node(self, node):
+        label_sym = self.declare_or_get_label(node, node.name, set_defined=True)
+        self.asm_out('TAG', label_sym.asm_tag)
+        return self.compile_statement(node.stmt)
 
     def compile_EmptyStatement_node(self, node):
         return False
@@ -1082,7 +1092,7 @@ class Pcc:
             if func_name not in HELPER_FUNCTION_DESCR:
                 raise Exception('internal error: unexpected helper function name "%s"' % func_name)
             comment = HELPER_FUNCTION_DESCR[func_name]
-            asm_out = helper_func.asm_out
+            asm_out = helper_func.asm_buf
             asm_out('TAG', helper_func.asm_tag, comment=comment)
             if func_name == 'NEG':
                 asm_out('XOR', '0xffffffff')
@@ -1090,7 +1100,7 @@ class Pcc:
                 asm_out('RET')
             elif func_name == 'NOTL':
                 true_tag = AsmTag()
-                asm_out('OR', 0)                   ## assert F := A before conditional jump
+                asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
                 asm_out('JZ', true_tag)            ## IF (F == 0) GOTO true_tag
                 asm_out('LDA', 0)
                 asm_out('RET')                     ## return FALSE
@@ -1099,10 +1109,10 @@ class Pcc:
                 asm_out('RET')                     ## return TRUE
             elif func_name == 'ANDL':
                 ret_tag = AsmTag()
-                asm_out('OR', 0)                   ## assert F := A before conditional jump
+                asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
                 asm_out('JZ', ret_tag)             ## IF (F == 0) GOTO ret_tag
                 asm_out('LDA', SCR0)
-                asm_out('OR', 0, comment='LDAF')   ## assert F := A before conditional jump
+                asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
                 asm_out('JZ', ret_tag)             ## IF (F == 0) GOTO ret_tag
                 asm_out('LDA', 1)
                 asm_out('TAG', ret_tag)            ## ret_tag:
