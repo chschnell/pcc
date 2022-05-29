@@ -29,12 +29,10 @@ class PiPcc:
         self.do_reduce = do_reduce
         self.out_parameter = None
         self.pi = None
-        self.t0 = None
+        self.t0 = time()
 
     def run(self, filenames, asm_input=False, in_parameter=None, timeout_sec=None):
         self.out_parameter = []
-        if self.t0 is None:
-            self.t0 = time()
         ## connect pigpiod
         pi = self.pigpiod_connect()
         if pi is None:
@@ -49,29 +47,27 @@ class PiPcc:
         if asm_source is None:
             return 1
         ## upload and run asm_source
-        self.log_message('uploading %s to pigpiod' % asm_filename)
         asm_sid = pi.store_script(asm_source.encode('utf-8'))
         try:
             self.log_message('%s: executing with sid %d' % (asm_filename, asm_sid))
             t1 = time()
             run_result = pi.run_script(asm_sid, in_parameter)
+            if run_result != 0:
+                print('*** %s: run_script() failed with error %d' % (asm_filename, run_result), file=sys.stderr)
+                return 1
             try:
-                if run_result != 0:
-                    print('*** %s: run_script() failed with error %d' % (asm_filename, run_result), file=sys.stderr)
-                    return 1
                 while True:
                     status, p = pi.script_status(asm_sid)
                     if status == pigpio.PI_SCRIPT_HALTED:
                         break
-                    if timeout_sec is not None and time() - t1 > timeout_sec:
+                    elif timeout_sec is not None and time() - t1 > timeout_sec:
                         self.log_message('%s: script timed out, stopping...' % asm_filename)
                         break
                     sleep(0.01)
-                status, p = pi.script_status(asm_sid)
                 if status != pigpio.PI_SCRIPT_HALTED:
                     self.log_message('%s: not terminated (status: %d), stopping...' % (asm_filename, status))
                 else:
-                    self.log_message('%s: done, output parameter: [%s]' % (asm_filename, ', '.join([str(q) for q in p])))
+                    self.log_message('%s: done, output: [%s]' % (asm_filename, ', '.join([str(q) for q in p])))
                     self.out_parameter = list(p)
             finally:
                 pi.stop_script(asm_sid)
@@ -82,19 +78,21 @@ class PiPcc:
     def run_testsuite(self, ts_filename):
         config = configparser.ConfigParser()
         config.read(ts_filename)
-        for section_name in config.sections():
+        n_sections = len(config.sections())
+        for i_section, section_name in enumerate(config.sections()):
             section = config[section_name]
             if 'c_file' not in section:
-                raise Exception('Missing config parameter "c_file" in section [%s]' % section_name)
+                print('*** error: missing required parameter "c_file" in section [%s]' % section_name, file=sys.stderr)
             c_file = section.get('c_file')
             c_filepath = str(Path(ts_filename).with_name(c_file))
             param_in = parse_parameter(section.get('param_in', None))
             param_out = parse_parameter(section.get('param_out', None))
             timeout_sec = section.getint('timeout_sec', None)
+            self.log_message('[%d/%d] %s' % (i_section+1, n_sections, section_name))
             if self.run([c_filepath], in_parameter=param_in, timeout_sec=timeout_sec) != 0:
                 return 1
             elif param_out is not None and param_out != self.out_parameter:
-                print('*** error: unexpected output parameter, expected %s' % param_out, file=sys.stderr)
+                print('*** error: unexpected output, expected %s' % param_out, file=sys.stderr)
                 return 1
         return 0
 
