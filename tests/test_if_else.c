@@ -6,9 +6,7 @@ int bool(int value)
     if (value) {
         return true;
     }
-    else {
-        return false;
-    }
+    return false;
 }
 
 int min3(int a, int b, int c)
