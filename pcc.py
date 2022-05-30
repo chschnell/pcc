@@ -342,7 +342,6 @@ class ProgramFunctionSymbol(FunctionSymbol):
         super().__init__(cname, prototype)
         self.decl_node = decl_node      ## c_ast.Decl, first declaration's node
         self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
-        self.root_scope = None          ## ChainMap, function's root scope
         self.has_caller = False         ## bool, True: function has at least one caller
         self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
         self.asm_buf = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
@@ -732,7 +731,6 @@ class Pcc:
         self.asm_out = func_sym.asm_buf
         self.push_scope()
         try:
-            func_sym.root_scope = self.scope
             self.asm_out('TAG', func_sym.asm_tag, comment=func_sym.decl_str())
             if func_sym.prototype.arg_count > 0:
                 arg_vars = func_sym.arg_vars
