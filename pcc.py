@@ -329,16 +329,6 @@ class VmParameterSymbol(VariableSymbol):
     def asm_repr(self):                 ## str vm_param_id, VM parameter name ("pN")
         return self.vm_param_id
 
-class LabelSymbol(AbstractSymbol):
-    def __init__(self, cname, decl_node, is_defined):
-        super().__init__(cname)
-        self.asm_tag = AsmTag()
-        self.is_defined = is_defined    ## bool, labels can be used with GOTO before they are defined
-        self.decl_node = decl_node      ## c_ast.Label or c_ast.Goto, AST node where this label was declared first
-
-    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to label's TAG
-        return self.asm_tag
-
 class FunctionSymbol(AbstractSymbol):
     def __init__(self, cname, prototype):
         super().__init__(cname)
@@ -493,12 +483,6 @@ class Pcc:
             elif not prog_func.has_caller:
                 ## drop unused functions
                 prog_functions.remove(prog_func)
-            else:
-                ## check that all used labels within user defined functions are defined
-                for label_sym in prog_func.root_scope.maps[0].values():
-                    if isinstance(label_sym, LabelSymbol) and not label_sym.is_defined:
-                        self.log_error(PccError(label_sym.decl_node,
-                            'label "%s" undefined' % label_sym.cname))
         if self.error_count == 0:
             ## append main() CALL to init segment
             self.asm_buf('CALL', main_func.asm_tag, comment='main()')
@@ -606,12 +590,10 @@ class Pcc:
             return symbol
         return None
 
-    def bind_symbol(self, node, sym_obj, scope=None):
-        if scope is None:
-            scope = self.scope
-        if sym_obj.cname in scope.maps[0]:
+    def bind_symbol(self, node, sym_obj):
+        if sym_obj.cname in self.scope.maps[0]:
             raise PccError(node, 'redefinition of "%s"' % sym_obj.cname)
-        scope.maps[0][sym_obj.cname] = sym_obj
+        self.scope.maps[0][sym_obj.cname] = sym_obj
         return sym_obj
 
     def declare_enum(self, enum_decl):
@@ -638,16 +620,6 @@ class Pcc:
             raise PccError(node, '%s: external variable names must contain one of "p0", "p1", ..., "p9"' % cname)
         vm_param_name = m.groups(0)[0]
         return self.bind_symbol(node, VmParameterSymbol(ctype, cname, vm_param_name))
-
-    def declare_or_get_label(self, node, cname, set_defined=False):
-        label_sym = self.find_symbol(cname, filter=LabelSymbol)
-        if label_sym is None:
-            label_sym = self.bind_symbol(node, LabelSymbol(cname, node, set_defined), scope=self.context_func_sym.root_scope)
-        elif set_defined:
-            if label_sym.is_defined:
-                raise PccError(node, 'redefinition of label "%s"' % cname)
-            label_sym.is_defined = True
-        return label_sym
 
     def declare_function(self, node, is_extern=False):
         func_name = node.name
@@ -938,18 +910,18 @@ class Pcc:
     def compile_Compound_node(self, node):
         terminated = False
         if node.block_items is not None:
-            prev_terminated = False
             self.push_scope()
             try:
+                in_unreachable_code = False
                 for statement_node in node.block_items:
-                    if prev_terminated:
-                        if isinstance(statement_node, c_ast.Label):
-                            prev_terminated = False
-                        else:
-                            self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
-                            break
-                    prev_terminated = self.compile_statement(statement_node)
-                terminated = prev_terminated
+                    if in_unreachable_code:
+                        self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
+                        break
+                    s_terminated = self.compile_statement(statement_node)
+                    if s_terminated:
+                        terminated = True
+                    if s_terminated or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
+                        in_unreachable_code = True
             finally:
                 self.pop_scope()
         return terminated
@@ -996,12 +968,12 @@ class Pcc:
             self.compile_expression(node.cond)      ## A := compile(expr)
             self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             self.asm_out('JZ', end_tag)             ## expr == FALSE => end_tag
-            self.compile_statement(node.stmt)       ## compile statement(s)
+            trm = self.compile_statement(node.stmt) ## compile statement(s)
             self.asm_out('JMP', begin_tag)          ## => begin_tag
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
             self.pop_loop_tags()
-        return False
+        return trm
 
     def compile_DoWhile_node(self, node):
         begin_tag = AsmTag()
@@ -1009,14 +981,14 @@ class Pcc:
         self.push_loop_tags(begin_tag, end_tag)
         try:
             self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
-            self.compile_statement(node.stmt)       ## compile statement(s)
+            trm = self.compile_statement(node.stmt) ## compile statement(s)
             self.compile_expression(node.cond)      ## A := compile(expr)
             self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             self.asm_out('JNZ', begin_tag)          ## expr == TRUE => begin_tag
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
             self.pop_loop_tags()
-        return False
+        return trm
 
     def compile_For_node(self, node):
         begin_tag = AsmTag()
@@ -1039,7 +1011,7 @@ class Pcc:
                     self.compile_expression(node.cond)  ## compile cond-expression, A := compile(cond)
                     self.asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
                     self.asm_out('JZ', end_tag)         ## cond == FALSE => end_tag
-                self.compile_statement(node.stmt)       ## compile loop-body statement(s)
+                trm = self.compile_statement(node.stmt) ## compile loop-body statement(s)
                 self.asm_out('TAG', next_tag)           ## TAG: next_tag
                 if node.next is not None:               ## compile iteration-expression(s)
                     if isinstance(node.next, c_ast.ExprList):
@@ -1054,7 +1026,7 @@ class Pcc:
                     self.pop_scope()
         finally:
             self.pop_loop_tags()
-        return False
+        return trm
 
     def compile_Continue_node(self, node):
         if self.loop_continue_tag is None:
@@ -1067,16 +1039,6 @@ class Pcc:
             raise PccError(node, '"break" outside loop not allowed')
         self.asm_out('JMP', self.loop_break_tag)
         return False
-
-    def compile_Goto_node(self, node):
-        label_sym = self.declare_or_get_label(node, node.name)
-        self.asm_out('JMP', label_sym.asm_tag)
-        return False
-
-    def compile_Label_node(self, node):
-        label_sym = self.declare_or_get_label(node, node.name, set_defined=True)
-        self.asm_out('TAG', label_sym.asm_tag)
-        return self.compile_statement(node.stmt)
 
     def compile_EmptyStatement_node(self, node):
         return False
