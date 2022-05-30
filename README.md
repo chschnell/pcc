@@ -90,12 +90,12 @@ Unsupported C99 operators:
 
 Supported C99 statements:
 
-- `if`, `else`, `for`, `while`, `do`, `break`, `continue`, `label`, `goto` and `return`
+- `if`, `else`, `for`, `while`, `do`, `break`, `continue` and `return`
 - compound `{ ... }` and expression statements
 
 Unsupported C99 statements:
 
-- `switch`, `case`
+- `switch`, `case`, `label` and `goto`
 
 ### Declarations
 
