@@ -714,11 +714,12 @@ class Pcc:
                 self.compile_expression(rhs_node, dst_reg=dst_reg)
         elif assign_op[:-1] in VM_BINARY_ARITHMETIC_OP:
             operator = VM_BINARY_ARITHMETIC_OP[assign_op[:-1]]
-            self.asm_out('LDA', dst_reg)
             if rhs_term is not None:
+                self.asm_out('LDA', dst_reg)
                 self.asm_out(operator, rhs_term)
             else:
                 self.compile_expression(rhs_node, dst_reg=SCR0)
+                self.asm_out('LDA', dst_reg)
                 self.asm_out(operator, SCR0)
             self.asm_out('STA', dst_reg)
         else:
