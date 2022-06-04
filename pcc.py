@@ -4,7 +4,7 @@
 ## PIGS C compiler
 ##
 
-import sys, os, argparse, re, collections
+import sys, argparse, re, collections
 from pathlib import PurePath, Path
 
 from pycparser import c_ast
@@ -1156,8 +1156,7 @@ def pcc(filenames, debug=False, do_reduce=True):
 
     c_source_files = {}
     ast = None
-    os.makedirs('cparser.out', exist_ok=True)
-    cparser = CParser(taboutputdir='cparser.out')
+    cparser = CParser()
     for filename in filenames:
         with open(filename, 'r') as f:
             c_source_lines = list(line.rstrip('\r\n') for line in f.readlines())
