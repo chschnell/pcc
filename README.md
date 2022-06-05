@@ -31,7 +31,7 @@ Compiler command line arguments:
 
 Specify one or more `*.c` input files on the command line. The output filename defaults to the last `*.c` filename with extension `*.s` in the current working directory. Use command line argument `-o-` to write output to STDOUT.
 
-Input files are parsed separately and merged into a single compilation unit before compiling the assembly output, symbols declared in one input file are thus visible to subsequent input files. Header file `vm_api.h` is implicitly included (parsed first before any of the given input files) unless it is explicitly stated as an input file.
+Input files are concatenated into a single translation unit before compiling the assembly output, symbols declared in one input file are thus visible to subsequent input files. Header file `vm_api.h` is implicitly included (parsed first before any of the given input files) unless it is explicitly stated as an input file.
 
 Examples:
 

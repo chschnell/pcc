@@ -1,4 +1,4 @@
-#!/bin/python3m
+#!/usr/bin/env python3
 ##
 ## pcc.py
 ## PIGS C compiler
@@ -112,11 +112,6 @@ class PccError(Exception):
     def __init__(self, node, message):
         super().__init__(message)
         self.node = node
-
-def format_src_quote(c_source_files, filename, row, col):
-    src_line = c_source_files[filename][row-1]
-    pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
-    return '%s\n%s^^^' % (src_line, pointer_indent)
 
 ## ---------------------------------------------------------------------------
 
@@ -435,8 +430,8 @@ class FunctionPrototype:
 ## ---------------------------------------------------------------------------
 
 class Pcc:
-    def __init__(self, c_files, debug):
-        self.c_source_files = c_files       ## dict(str filename: list(str c_src_line)), unmodified C sources for error reports
+    def __init__(self, c_sources, debug):
+        self.c_sources = c_sources          ## CSourceBundle, C sources to compile
         self.debug = debug                  ## bool, True: show extra debug output
         self.error_count = 0                ## int, error counter
         self.var_count = None               ## int, number of VM variables allocated
@@ -450,7 +445,6 @@ class Pcc:
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
         self.declared_prog_func = set()     ## set(ProgramFunctionSymbol func_sym), all declared program functions
         self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
-        self.log_error_location = None      ## most recent reported error location
         self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
         self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
 
@@ -484,7 +478,7 @@ class Pcc:
                 prog_functions.remove(prog_func)
         if self.error_count == 0:
             ## append main() CALL to init segment
-            self.asm_buf('CALL', main_func.asm_tag, comment='main()')
+            self.asm_buf('CALL', main_func.asm_tag, comment='main();')
             self.asm_buf('HALT')
             ## compile helper functions
             self.compile_helper_function_impl()
@@ -557,17 +551,12 @@ class Pcc:
         self._log_message(node, 'warning: %s' % message, context_func_sym)
 
     def _log_message(self, node, message, context_func_sym):
-        if context_func_sym is not None:
-            e_location = (context_func_sym.impl_node.coord.file, context_func_sym.cname)
-            if self.log_error_location != e_location:
-                self.log_error_location = e_location
-                print('%s: In function "%s":' % e_location, file=sys.stderr)
         if node is None:
             print(message, file=sys.stderr)
         else:
-            coord = node.coord
-            print('%s: %s' % (coord, message), file=sys.stderr)
-            print(format_src_quote(self.c_source_files, coord.file, coord.line, coord.column), file=sys.stderr)
+            flat_row, col = node.coord.line, node.coord.column
+            func_name = context_func_sym.cname if context_func_sym is not None else None
+            print(self.c_sources.format_error(flat_row, col, message, ctx_func_name=func_name), file=sys.stderr)
 
     def push_scope(self):
         self.scope = self.scope.new_child()
@@ -897,7 +886,7 @@ class Pcc:
                 args.append(arg_term)
             if func_sym.vm_func_cmd == 'HALT':
                 terminated = True
-            self.asm_out(func_sym.vm_func_cmd, *args, comment='%s()' % func_name)
+            self.asm_out(func_sym.vm_func_cmd, *args, comment='%s();' % func_name)
         else:
             ## compile call to user defined function
             func_sym.has_caller = True
@@ -905,7 +894,7 @@ class Pcc:
                 arg_asm_var = func_sym.arg_vars[i_arg]
                 arg_expr = node.args.exprs[i_arg]
                 self.compile_assignment(arg_asm_var, arg_expr)
-            self.asm_out('CALL', func_sym.asm_tag, comment='%s()' % func_name)
+            self.asm_out('CALL', func_sym.asm_tag, comment='%s();' % func_name)
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
         return terminated
@@ -1149,41 +1138,77 @@ class Pcc:
 
 ## ---------------------------------------------------------------------------
 
+class CSourceBundle:
+    def __init__(self):
+        self.c_source_files = {}     ## dict(str filename: list(str line))
+        self.c_translation_unit = '' ## str, combined and cleaned source code
+        self.segments = []           ## list(tuple(str filename, int flat_idx_start, int flat_idx_end))
+        self.n_flat_lines = 0
+        self.e_location = None
+
+    def read_files(self, filenames):
+        for filename in filenames:
+            if not Path(filename).is_file():
+                print('%s: error: file not found' % filename, file=sys.stderr)
+                return False
+            ## read file content into list, strip eol
+            with open(filename, 'r') as f:
+                c_source_lines = list(line.rstrip('\r\n') for line in f.readlines())
+            self.c_source_files[filename] = c_source_lines
+            ## flatten list of lines into string, drop C-style comments
+            c_source = '\n'.join(c_source_lines) + '\n'
+            c_source = re.sub(r'//.*', '', c_source)
+            c_source = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'.*', '', m.group(0)), c_source)
+            line_count = len(c_source_lines)
+            self.segments.append((filename, self.n_flat_lines, self.n_flat_lines + line_count))
+            self.c_translation_unit += c_source
+            self.n_flat_lines += line_count
+        return True
+
+    def format_error(self, flat_row, col, message, ctx_func_name=None):
+        ## map flat_row to (filename, row)
+        filename = None
+        flat_idx = flat_row - 1
+        for seg_filename, flat_idx_start, flat_idx_end in self.segments:
+            if flat_idx >= flat_idx_start and flat_idx < flat_idx_end:
+                filename = seg_filename
+                row = flat_row - flat_idx_start
+                break
+        if filename is None:
+            return ':%d:%d: %s' % (flat_row, col, message)
+        ## build error message
+        err_message = ''
+        if ctx_func_name is not None:
+            e_location = (filename, ctx_func_name)
+            if self.e_location != e_location:
+                self.log_error_location = e_location
+                err_message = '%s: In function "%s":\n' % e_location
+        src_line = self.c_source_files[filename][row-1]
+        pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
+        err_message += '%s:%d:%d: %s\n%s\n%s^^^' % (filename, row, col, message, src_line, pointer_indent)
+        return err_message
+
 def pcc(filenames, debug=False, do_reduce=True):
     VM_API_H = 'vm_api.h'
     if VM_API_H not in [PurePath(filename).name for filename in filenames]:
         filenames = [VM_API_H] + filenames
-    for filename in filenames:
-        if not Path(filename).is_file():
-            print('%s: error: file not found' % filename, file=sys.stderr)
-            return None
 
-    c_source_files = {}
-    ast = None
-    cparser = CParser()
-    for filename in filenames:
-        with open(filename, 'r') as f:
-            c_source_lines = list(line.rstrip('\r\n') for line in f.readlines())
-        c_source_files[filename] = c_source_lines
-        ## drop C-style comments
-        c_source = '\n'.join(c_source_lines)
-        c_source = re.sub(r'//.*', '', c_source)
-        c_source = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'.*', '', m.group(0)), c_source)
-        try:
-            if ast is None:
-                ast = cparser.parse(c_source, filename)
-            else:
-                ast.ext += cparser.parse(c_source, filename).ext
-        except ParseError as e:
+    c_sources = CSourceBundle()
+    if not c_sources.read_files(filenames):
+        return None
+    try:
+        ast = CParser().parse(c_sources.c_translation_unit)
+    except ParseError as e:
+        m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
+        if m is None:
             print(e, file=sys.stderr)
-            m = re.fullmatch('([^:]+):(\d+):(\d+):.+', str(e))
-            if m:
-                filename, row, col = m[1], int(m[2]), int(m[3])
-                print(format_src_quote(c_source_files, filename, row, col), file=sys.stderr)
-            print('*** aborted with parser error', file=sys.stderr)
-            return None
+        else:
+            flat_row, col, message = int(m[1]), int(m[2]), m[3]
+            print(c_sources.format_error(flat_row, col, message), file=sys.stderr)
+        print('*** aborted with parser error', file=sys.stderr)
+        return None
 
-    cc = Pcc(c_source_files, debug)
+    cc = Pcc(c_sources, debug)
     if cc.compile(ast, do_reduce=do_reduce) != 0:
         print('*** aborted with compiler error(s)', file=sys.stderr)
         return None
