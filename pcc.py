@@ -700,16 +700,20 @@ class Pcc:
             self.compile_BinaryOp_node(node)
         elif isinstance(node, c_ast.FuncCall):
             self.compile_FuncCall_node(node)
+        elif isinstance(node, c_ast.Assignment):
+            self.compile_Assignment_node(node, in_expr=True)
         else:
             raise PccError(node, 'unsupported expression syntax')
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
 
-    def compile_assignment(self, dst_reg, rhs_node, assign_op='='):
+    def compile_assignment(self, dst_reg, rhs_node, assign_op='=', in_expr=False):
         rhs_term = self.try_parse_term(rhs_node)
         if assign_op == '=':
             if rhs_term is not None:
                 self.asm_out('LD', dst_reg, rhs_term)
+                if in_expr:
+                    self.asm_out('LDA', dst_reg)
             else:
                 self.compile_expression(rhs_node, dst_reg=dst_reg)
         elif assign_op[:-1] in VM_BINARY_ARITHMETIC_OP:
@@ -859,12 +863,12 @@ class Pcc:
             raise PccError(node, 'unsupported declaration syntax')
         return False
 
-    def compile_Assignment_node(self, node):
+    def compile_Assignment_node(self, node, in_expr=False):
         lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
         if lhs_sym is None:
             raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
         lhs_reg = lhs_sym.asm_repr()
-        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op)
+        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op, in_expr=in_expr)
         return False
 
     def compile_FuncCall_node(self, node, dst_reg=None):
