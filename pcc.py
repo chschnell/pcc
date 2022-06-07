@@ -332,7 +332,7 @@ class FunctionSymbol(AbstractSymbol):
     def decl_str(self):
         return '%s %s(%s)' % (self.prototype.ret_ctype, self.cname, ', '.join(self.prototype.arg_ctypes))
 
-class ProgramFunctionSymbol(FunctionSymbol):
+class UserDefFunctionSymbol(FunctionSymbol):
     def __init__(self, cname, prototype, decl_node):
         super().__init__(cname, prototype)
         self.decl_node = decl_node      ## c_ast.Decl, first declaration's node
@@ -439,60 +439,60 @@ class Pcc:
         self.asm_buf = AsmBuffer()          ## AsmBuffer, root output buffer
         self.asm_out = self.asm_buf         ## AsmBuffer, current output buffer
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
-        self.context_func_sym = None        ## None or ProgramFunctionSymbol, current function context
+        self.context_func_sym = None        ## None or UserDefFunctionSymbol, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
-        self.declared_prog_func = set()     ## set(ProgramFunctionSymbol func_sym), all declared program functions
-        self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
+        self.declared_userdef_func = set()  ## set(UserDefFunctionSymbol func_sym), all declared program functions
         self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
         self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
+        self.helper_functions = {}          ## dict(str func_name: HelperFunction hlp_func), set of internal helper functions
 
     def compile(self, root_node, do_reduce=True):
-        prog_functions = []                 ## list(ProgramFunctionSymbol func), all implemented program functions
-        ## compile top-level declarations and program functions
+        userdef_functions = []              ## list(UserDefFunctionSymbol func), all implemented user-defined functions
+        ## compile top-level declarations and user-defined functions
         for node in root_node:
             try:
                 if isinstance(node, c_ast.Decl):
                     self.compile_Decl_node(node)
                 elif isinstance(node, c_ast.FuncDef):
                     func_sym = self.compile_function_definition(node)
-                    prog_functions.append(func_sym)
+                    userdef_functions.append(func_sym)
                 else:
                     raise PccError(node, 'unsupported syntax')
             except PccError as e:
                 self.log_error(e)
         ## check user defined functions
-        main_func = self.find_symbol('main', filter=ProgramFunctionSymbol)
+        main_func = self.find_symbol('main', filter=UserDefFunctionSymbol)
         if main_func is None:
             self.log_error(PccError(None, 'missing main() function implementation'))
         else:
             main_func.has_caller = True
-        for prog_func in self.declared_prog_func:
-            if prog_func.has_caller and prog_func.impl_node is None:
+        for userdef_func in self.declared_userdef_func:
+            if userdef_func.has_caller and userdef_func.impl_node is None:
                 ## check that all called user defined functions are actually defined
-                self.log_error(PccError(prog_func.decl_node,
-                    'function "%s" declared without implementation' % prog_func.cname))
-            elif not prog_func.has_caller:
+                self.log_error(PccError(userdef_func.decl_node,
+                    'function "%s" declared without implementation' % userdef_func.cname))
+            elif not userdef_func.has_caller:
                 ## drop unused functions
-                prog_functions.remove(prog_func)
+                userdef_functions.remove(userdef_func)
         if self.error_count == 0:
             ## append main() CALL to init segment
             self.asm_buf('CALL', main_func.asm_tag, comment='main();')
             self.asm_buf('HALT')
             ## compile helper functions
             self.compile_helper_function_impl()
-            all_functions = prog_functions + list(self.helper_functions.values())
+            all_functions = userdef_functions + list(self.helper_functions.values())
             self.all_asm_bufs = [self.asm_buf] + [f.asm_buf for f in all_functions]
-            ## drop unused tags in program functions
-            tags = dict() ## dict(AsmTag asm_tag: int use_count), preseed w. program/helper functions
+            ## drop unused tags in user-defined functions
+            tags = dict() ## dict(AsmTag asm_tag: int use_count), preseed w. functions
             for func_sym in all_functions:
                 tags[func_sym.asm_tag] = 1
-            for func in prog_functions:
+            for func in userdef_functions:
                 func.asm_buf.drop_unused_tags(tags.copy())
-            ## reduce program functions
+            ## reduce user-defined functions
             if do_reduce:
-                for func in prog_functions:
+                for func in userdef_functions:
                     func.asm_buf.reduce()
             ## bind VM tags
             tag_count = 0
@@ -530,10 +530,11 @@ class Pcc:
             asm_lines.append(';  v3: reserved: ARG2')
             for asm_var in self.all_asm_vars:
                 asm_lines.append(asm_var.format_decl_comment())
-        for asm_buf in self.all_asm_bufs:
+        for i_buf, asm_buf in enumerate(self.all_asm_bufs):
             if len(asm_lines) > 0:
                 asm_lines.append('')
-            asm_lines.extend(asm_buf.format_statements('    ', use_comments))
+            indent = '' if i_buf == 0 else '    '
+            asm_lines.extend(asm_buf.format_statements(indent, use_comments))
         result = '\n'.join(asm_lines)
         if file is not None:
             print(result, file=file)
@@ -637,8 +638,8 @@ class Pcc:
                 else:
                     func_sym = VmApiFunctionSymbol(func_name, prototype, vm_func_cmd)
             else:
-                func_sym = ProgramFunctionSymbol(func_name, prototype, node)
-                self.declared_prog_func.add(func_sym)
+                func_sym = UserDefFunctionSymbol(func_name, prototype, node)
+                self.declared_userdef_func.add(func_sym)
             return self.bind_symbol(node, func_sym)
 
     def declare_helper_function(self, node, func_name):
@@ -719,7 +720,7 @@ class Pcc:
             raise PccError(rhs_node, 'unsupported assignment operator "%s"' % assign_op)
 
     def compile_function_definition(self, node):
-        func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
+        func_sym = self.declare_function(node.decl)     ## UserDefFunctionSymbol func_sym
         if func_sym.impl_node is not None:
             raise PccError(node, 'redefinition of "%s"' % func_sym.cname)
         func_sym.impl_node = node
@@ -926,34 +927,34 @@ class Pcc:
     def compile_Return_node(self, node):
         ret_val_expected = self.context_func_sym.prototype.has_return
         ret_val_given = node.expr is not None
-        if ret_val_given and not ret_val_expected:
-            self.log_warning(node, 'function "%s" should not return a value' %
+        if not ret_val_expected and ret_val_given:
+            self.log_warning(node, 'function "%s" does not return a value' %
                 self.context_func_sym.decl_str(), self.context_func_sym)
-        elif not ret_val_given and ret_val_expected:
+        elif ret_val_expected and not ret_val_given:
             self.log_warning(node, 'function "%s" should return a value' %
                 self.context_func_sym.decl_str(), self.context_func_sym)
         elif ret_val_given:
-            self.compile_expression(node.expr)
+            self.compile_expression(node.expr)              ## A := {expr}; F := A
         self.asm_out('RET')
         return True
 
     def compile_If_node(self, node):
         else_tag = AsmTag() if node.iffalse is not None else None
         endif_tag = AsmTag()
-        self.compile_expression(node.cond)          ## A := compile(expr)
-        self.asm_out('OR', 0, comment='F=A')        ## assert F := A before conditional jump
+        self.compile_expression(node.cond)                  ## A := compile(expr)
+        self.asm_out('OR', 0, comment='F=A')                ## assert F := A before conditional jump
         if else_tag is None:
-            self.asm_out('JZ', endif_tag)           ## IF expr == FALSE AND no-else-branch GOTO endif_tag
+            self.asm_out('JZ', endif_tag)                   ## IF expr == FALSE AND no-else-branch GOTO endif_tag
         else:
-            self.asm_out('JZ', else_tag)            ## IF expr == FALSE AND has-else-branch GOTO else_tag
-        r1 = self.compile_statement(node.iftrue)    ## compile if-branch statement(s)
+            self.asm_out('JZ', else_tag)                    ## IF expr == FALSE AND has-else-branch GOTO else_tag
+        r1 = self.compile_statement(node.iftrue)            ## compile if-branch statement(s)
         r2 = False
         if else_tag is not None:
-            if not r1:                              ## omit the following JMP when if-branch returned (RET)
-                self.asm_out('JMP', endif_tag)      ## IF has-else-branch GOTO endif_tag
-            self.asm_out('TAG', else_tag)           ## TAG: else_tag
-            r2 = self.compile_statement(node.iffalse)   ## compile else-branch
-        self.asm_out('TAG', endif_tag)              ## TAG: endif_tag
+            if not r1:                                      ## omit the following JMP when if-branch returned (RET)
+                self.asm_out('JMP', endif_tag)              ## IF has-else-branch GOTO endif_tag
+            self.asm_out('TAG', else_tag)                   ## TAG: else_tag
+            r2 = self.compile_statement(node.iffalse)       ## compile else-branch
+        self.asm_out('TAG', endif_tag)                      ## TAG: endif_tag
         return r1 and r2
 
     def compile_While_node(self, node):
@@ -961,31 +962,31 @@ class Pcc:
         end_tag = AsmTag()
         self.push_loop_tags(begin_tag, end_tag)
         try:
-            self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
-            self.compile_expression(node.cond)      ## A := compile(expr)
-            self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
-            self.asm_out('JZ', end_tag)             ## expr == FALSE => end_tag
-            ret = self.compile_statement(node.stmt) ## compile statement(s)
-            self.asm_out('JMP', begin_tag)          ## => begin_tag
-            self.asm_out('TAG', end_tag)            ## TAG: end_tag
+            self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
+            self.compile_expression(node.cond)              ## A := compile(expr)
+            self.asm_out('OR', 0, comment='F=A')            ## assert F := A before conditional jump
+            self.asm_out('JZ', end_tag)                     ## expr == FALSE => end_tag
+            returned = self.compile_statement(node.stmt)    ## compile statement(s)
+            self.asm_out('JMP', begin_tag)                  ## => begin_tag
+            self.asm_out('TAG', end_tag)                    ## TAG: end_tag
         finally:
             self.pop_loop_tags()
-        return ret
+        return returned
 
     def compile_DoWhile_node(self, node):
         begin_tag = AsmTag()
         end_tag = AsmTag()
         self.push_loop_tags(begin_tag, end_tag)
         try:
-            self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
-            ret = self.compile_statement(node.stmt) ## compile statement(s)
-            self.compile_expression(node.cond)      ## A := compile(expr)
-            self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
-            self.asm_out('JNZ', begin_tag)          ## expr == TRUE => begin_tag
-            self.asm_out('TAG', end_tag)            ## TAG: end_tag
+            self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
+            returned = self.compile_statement(node.stmt)    ## compile statement(s)
+            self.compile_expression(node.cond)              ## A := compile(expr)
+            self.asm_out('OR', 0, comment='F=A')            ## assert F := A before conditional jump
+            self.asm_out('JNZ', begin_tag)                  ## expr == TRUE => begin_tag
+            self.asm_out('TAG', end_tag)                    ## TAG: end_tag
         finally:
             self.pop_loop_tags()
-        return ret
+        return returned
 
     def compile_For_node(self, node):
         begin_tag = AsmTag()
@@ -997,33 +998,33 @@ class Pcc:
             if needs_local_scope:
                 self.push_scope()
             try:
-                if node.init is not None:               ## compile init-clause statement(s)
+                if node.init is not None:                       ## compile init-clause statement(s)
                     if isinstance(node.init, c_ast.DeclList):
                         for decl_node in node.init.decls:
                             self.compile_Decl_node(decl_node)
                     else:
                         self.compile_statement(node.init)
-                self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
+                self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
                 if node.cond is not None:
-                    self.compile_expression(node.cond)  ## compile cond-expression, A := compile(cond)
-                    self.asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
-                    self.asm_out('JZ', end_tag)         ## cond == FALSE => end_tag
-                ret = self.compile_statement(node.stmt) ## compile loop-body statement(s)
-                self.asm_out('TAG', next_tag)           ## TAG: next_tag
-                if node.next is not None:               ## compile iteration-expression(s)
+                    self.compile_expression(node.cond)          ## compile cond-expression, A := compile(cond)
+                    self.asm_out('OR', 0, comment='F=A')        ## assert F := A before conditional jump
+                    self.asm_out('JZ', end_tag)                 ## cond == FALSE => end_tag
+                returned = self.compile_statement(node.stmt)    ## compile loop-body statement(s)
+                self.asm_out('TAG', next_tag)                   ## TAG: next_tag
+                if node.next is not None:                       ## compile iteration-expression(s)
                     if isinstance(node.next, c_ast.ExprList):
                         for expr_node in node.next.exprs:
                             self.compile_expression(expr_node)
                     else:
                         self.compile_expression(node.next)
-                self.asm_out('JMP', begin_tag)          ## => begin_tag
-                self.asm_out('TAG', end_tag)            ## TAG: end_tag
+                self.asm_out('JMP', begin_tag)                  ## => begin_tag
+                self.asm_out('TAG', end_tag)                    ## TAG: end_tag
             finally:
                 if needs_local_scope:
                     self.pop_scope()
         finally:
             self.pop_loop_tags()
-        return ret
+        return returned
 
     def compile_Continue_node(self, node):
         if self.loop_continue_tag is None:
@@ -1158,12 +1159,12 @@ class CSourceBundle:
                 self.c_segments.append((filename, ttl_line_count, ttl_line_count + len(c_source_lines)))
                 ttl_line_count += len(c_source_lines)
                 c_result += '\n'.join(c_source_lines) + '\n'
-            c_result = re.sub(r'//.*', '', c_result)
-            c_result = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'[^\n]', '', m.group(0)), c_result)
-            return c_result
         except OSError as e:
             print(str(e), file=sys.stderr)
-        return None
+            return None
+        c_result = re.sub(r'//.*', '', c_result)
+        c_result = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'[^\n]', '', m.group(0)), c_result)
+        return c_result
 
     def format_src_message(self, flat_row, col, message, ctx_func_name=None):
         ## map flat_row to (filename, row)
@@ -1188,10 +1189,9 @@ class CSourceBundle:
         err_message += '%s:%d:%d: %s\n%s\n%s^^^' % (filename, row, col, message, src_line, pointer_indent)
         return err_message
 
-def pcc(filenames, debug=False, do_reduce=True):
-    VM_API_H = 'vm_api.h'
-    if VM_API_H not in [PurePath(filename).name for filename in filenames]:
-        filenames = [VM_API_H] + filenames
+def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
+    if vm_api_h not in [PurePath(filename).name for filename in filenames]:
+        filenames = [vm_api_h] + filenames
     ## build C translation unit from input files
     c_sources = CSourceBundle()
     c_translation_unit = c_sources.read_files(filenames)
