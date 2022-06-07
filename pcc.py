@@ -556,7 +556,7 @@ class Pcc:
         else:
             flat_row, col = node.coord.line, node.coord.column
             func_name = context_func_sym.cname if context_func_sym is not None else None
-            print(self.c_sources.format_error(flat_row, col, message, ctx_func_name=func_name), file=sys.stderr)
+            print(self.c_sources.format_src_message(flat_row, col, message, ctx_func_name=func_name), file=sys.stderr)
 
     def push_scope(self):
         self.scope = self.scope.new_child()
@@ -720,6 +720,8 @@ class Pcc:
 
     def compile_function_definition(self, node):
         func_sym = self.declare_function(node.decl)     ## ProgramFunctionSymbol func_sym
+        if func_sym.impl_node is not None:
+            raise PccError(node, 'redefinition of "%s"' % func_sym.cname)
         func_sym.impl_node = node
         self.context_func_sym = func_sym
         self.asm_out = func_sym.asm_buf
@@ -735,8 +737,8 @@ class Pcc:
                     if arg_cname is None:
                         arg_cname = '00_%s$%d' % (func_sym.cname, i_arg)
                     self.declare_variable(node.body, arg_ctype, arg_cname, asm_var=arg_vars[i_arg])
-            terminated = self.compile_Compound_node(node.body)
-            if not terminated:
+            returned = self.compile_Compound_node(node.body)
+            if not returned:
                 if func_sym.prototype.has_return:
                     self.log_warning(node, 'function "%s" should return a value' %
                         func_sym.decl_str(), func_sym)
@@ -861,7 +863,7 @@ class Pcc:
         return False
 
     def compile_FuncCall_node(self, node, dst_reg=None):
-        terminated = False
+        returned = False
         func_name = node.name.name
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
@@ -885,7 +887,7 @@ class Pcc:
                     self.compile_assignment(arg_term, arg_expr_node)
                 args.append(arg_term)
             if func_sym.vm_func_cmd == 'HALT':
-                terminated = True
+                returned = True
             self.asm_out(func_sym.vm_func_cmd, *args, comment='%s();' % func_name)
         else:
             ## compile call to user defined function
@@ -897,10 +899,10 @@ class Pcc:
             self.asm_out('CALL', func_sym.asm_tag, comment='%s();' % func_name)
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
-        return terminated
+        return returned
 
     def compile_Compound_node(self, node):
-        terminated = False
+        returned = False
         if node.block_items is not None:
             self.push_scope()
             try:
@@ -909,14 +911,17 @@ class Pcc:
                     if in_unreachable_code:
                         self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
                         break
-                    s_terminated = self.compile_statement(statement_node)
-                    if s_terminated:
-                        terminated = True
-                    if s_terminated or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
-                        in_unreachable_code = True
+                    try:
+                        s_returned = self.compile_statement(statement_node)
+                        if s_returned:
+                            returned = True
+                        if s_returned or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
+                            in_unreachable_code = True
+                    except PccError as e:
+                        self.log_error(e, context_func_sym=self.context_func_sym)
             finally:
                 self.pop_scope()
-        return terminated
+        return returned
 
     def compile_Return_node(self, node):
         ret_val_expected = self.context_func_sym.prototype.has_return
@@ -941,15 +946,15 @@ class Pcc:
             self.asm_out('JZ', endif_tag)           ## IF expr == FALSE AND no-else-branch GOTO endif_tag
         else:
             self.asm_out('JZ', else_tag)            ## IF expr == FALSE AND has-else-branch GOTO else_tag
-        t1 = self.compile_statement(node.iftrue)    ## compile if-branch statement(s)
-        t2 = False
+        r1 = self.compile_statement(node.iftrue)    ## compile if-branch statement(s)
+        r2 = False
         if else_tag is not None:
-            if not t1:                              ## omit the following JMP when if-branch terminated (RET)
+            if not r1:                              ## omit the following JMP when if-branch returned (RET)
                 self.asm_out('JMP', endif_tag)      ## IF has-else-branch GOTO endif_tag
             self.asm_out('TAG', else_tag)           ## TAG: else_tag
-            t2 = self.compile_statement(node.iffalse)   ## compile else-branch
+            r2 = self.compile_statement(node.iffalse)   ## compile else-branch
         self.asm_out('TAG', endif_tag)              ## TAG: endif_tag
-        return t1 and t2
+        return r1 and r2
 
     def compile_While_node(self, node):
         begin_tag = AsmTag()
@@ -960,12 +965,12 @@ class Pcc:
             self.compile_expression(node.cond)      ## A := compile(expr)
             self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             self.asm_out('JZ', end_tag)             ## expr == FALSE => end_tag
-            trm = self.compile_statement(node.stmt) ## compile statement(s)
+            ret = self.compile_statement(node.stmt) ## compile statement(s)
             self.asm_out('JMP', begin_tag)          ## => begin_tag
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
             self.pop_loop_tags()
-        return trm
+        return ret
 
     def compile_DoWhile_node(self, node):
         begin_tag = AsmTag()
@@ -973,14 +978,14 @@ class Pcc:
         self.push_loop_tags(begin_tag, end_tag)
         try:
             self.asm_out('TAG', begin_tag)          ## TAG: begin_tag
-            trm = self.compile_statement(node.stmt) ## compile statement(s)
+            ret = self.compile_statement(node.stmt) ## compile statement(s)
             self.compile_expression(node.cond)      ## A := compile(expr)
             self.asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             self.asm_out('JNZ', begin_tag)          ## expr == TRUE => begin_tag
             self.asm_out('TAG', end_tag)            ## TAG: end_tag
         finally:
             self.pop_loop_tags()
-        return trm
+        return ret
 
     def compile_For_node(self, node):
         begin_tag = AsmTag()
@@ -1003,7 +1008,7 @@ class Pcc:
                     self.compile_expression(node.cond)  ## compile cond-expression, A := compile(cond)
                     self.asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
                     self.asm_out('JZ', end_tag)         ## cond == FALSE => end_tag
-                trm = self.compile_statement(node.stmt) ## compile loop-body statement(s)
+                ret = self.compile_statement(node.stmt) ## compile loop-body statement(s)
                 self.asm_out('TAG', next_tag)           ## TAG: next_tag
                 if node.next is not None:               ## compile iteration-expression(s)
                     if isinstance(node.next, c_ast.ExprList):
@@ -1018,7 +1023,7 @@ class Pcc:
                     self.pop_scope()
         finally:
             self.pop_loop_tags()
-        return trm
+        return ret
 
     def compile_Continue_node(self, node):
         if self.loop_continue_tag is None:
@@ -1139,37 +1144,32 @@ class Pcc:
 ## ---------------------------------------------------------------------------
 
 class CSourceBundle:
-    def __init__(self):
-        self.c_source_files = {}     ## dict(str filename: list(str line))
-        self.c_translation_unit = '' ## str, combined and cleaned source code
-        self.segments = []           ## list(tuple(str filename, int flat_idx_start, int flat_idx_end))
-        self.n_flat_lines = 0
-        self.e_location = None
-
     def read_files(self, filenames):
-        for filename in filenames:
-            if not Path(filename).is_file():
-                print('%s: error: file not found' % filename, file=sys.stderr)
-                return False
-            ## read file content into list, strip eol
-            with open(filename, 'r') as f:
-                c_source_lines = list(line.rstrip('\r\n') for line in f.readlines())
-            self.c_source_files[filename] = c_source_lines
-            ## flatten list of lines into string, drop C-style comments
-            c_source = '\n'.join(c_source_lines) + '\n'
-            c_source = re.sub(r'//.*', '', c_source)
-            c_source = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'.*', '', m.group(0)), c_source)
-            line_count = len(c_source_lines)
-            self.segments.append((filename, self.n_flat_lines, self.n_flat_lines + line_count))
-            self.c_translation_unit += c_source
-            self.n_flat_lines += line_count
-        return True
+        self.c_source_files = {}    ## dict(str filename: list(str line))
+        self.c_segments = []        ## list(tuple(str seg_filename, int flat_idx_start, int flat_idx_end))
+        self.e_location = None      ## tuple(), stores the most recent logged error location
+        ttl_line_count = 0          ## int, total number of lines
+        c_result = ''               ## str, combined and cleaned source code
+        try:
+            for filename in filenames:
+                with open(filename, 'r') as f:
+                    c_source_lines = list(line.rstrip('\r\n') for line in f.readlines())
+                self.c_source_files[filename] = c_source_lines
+                self.c_segments.append((filename, ttl_line_count, ttl_line_count + len(c_source_lines)))
+                ttl_line_count += len(c_source_lines)
+                c_result += '\n'.join(c_source_lines) + '\n'
+            c_result = re.sub(r'//.*', '', c_result)
+            c_result = re.sub(r'/\*(.|\n)*?\*/', lambda m: re.sub(r'[^\n]', '', m.group(0)), c_result)
+            return c_result
+        except OSError as e:
+            print(str(e), file=sys.stderr)
+        return None
 
-    def format_error(self, flat_row, col, message, ctx_func_name=None):
+    def format_src_message(self, flat_row, col, message, ctx_func_name=None):
         ## map flat_row to (filename, row)
         filename = None
         flat_idx = flat_row - 1
-        for seg_filename, flat_idx_start, flat_idx_end in self.segments:
+        for seg_filename, flat_idx_start, flat_idx_end in self.c_segments:
             if flat_idx >= flat_idx_start and flat_idx < flat_idx_end:
                 filename = seg_filename
                 row = flat_row - flat_idx_start
@@ -1181,7 +1181,7 @@ class CSourceBundle:
         if ctx_func_name is not None:
             e_location = (filename, ctx_func_name)
             if self.e_location != e_location:
-                self.log_error_location = e_location
+                self.e_location = e_location
                 err_message = '%s: In function "%s":\n' % e_location
         src_line = self.c_source_files[filename][row-1]
         pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
@@ -1192,22 +1192,24 @@ def pcc(filenames, debug=False, do_reduce=True):
     VM_API_H = 'vm_api.h'
     if VM_API_H not in [PurePath(filename).name for filename in filenames]:
         filenames = [VM_API_H] + filenames
-
+    ## build C translation unit from input files
     c_sources = CSourceBundle()
-    if not c_sources.read_files(filenames):
+    c_translation_unit = c_sources.read_files(filenames)
+    if c_translation_unit is None:
         return None
+    ## build abstract syntax tree (AST) from C translation unit
     try:
-        ast = CParser().parse(c_sources.c_translation_unit)
+        ast = CParser().parse(c_translation_unit)
     except ParseError as e:
         m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
         if m is None:
             print(e, file=sys.stderr)
         else:
             flat_row, col, message = int(m[1]), int(m[2]), m[3]
-            print(c_sources.format_error(flat_row, col, message), file=sys.stderr)
+            print(c_sources.format_src_message(flat_row, col, message), file=sys.stderr)
         print('*** aborted with parser error', file=sys.stderr)
         return None
-
+    ## translate AST into assembly language
     cc = Pcc(c_sources, debug)
     if cc.compile(ast, do_reduce=do_reduce) != 0:
         print('*** aborted with compiler error(s)', file=sys.stderr)
