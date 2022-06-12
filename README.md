@@ -155,23 +155,24 @@ This is already the case for all existing arithmetic and bitwise operators like 
 
 |Command|Description|Definition|
 |--|--|--|
-|LDAF x|Load accumulator and flags with x|A=x; F=A|
-|NOTL  |Logical NOT with accumulator|A=!A; F=A; A:(0\|1)|
-|ANDL x|Logical AND accumulator with x|A=(A && x); F=A; A:(0\|1)|
-|ORL x |Logical OR accumulator with x|A=(A \|\| x); F=A; A:(0\|1)|
-|EQ x  |Test whether A == x |A=(A == x); F=A; A:(0\|1)|
-|NE x  |Test whether A != x |A=(A != x); F=A; A:(0|1)|
-|GT x  |Test whether A > x  |A=(A > x); F=A; A:(0\|1)|
-|GE x  |Test whether A >= x |A=(A >= x); F=A; A:(0\|1)|
-|LT x  |Test whether A < x  |A=(A < x); F=A; A:(0\|1)|
-|LE x  |Test whether A <= x |A=(A <= x); F=A; A:(0\|1)|
-|NEG   |Flip sign of accumulator|A=-A; F=A|
-|BOOL  |Set A=1 if A!=0|A=(bool)A; F=A; A:(0\|1)|
-|NOT   |Bitwise NOT with accumulator|A=~A; F=A|
+|LDAF x    |Load accumulator and flags with x|A=x; F=A|
+|NOTL      |Logical NOT with accumulator|A=!A; F=A; A:(0\|1)|
+|ANDL x    |Logical AND accumulator with x|A=(A && x); F=A; A:(0\|1)|
+|ORL x     |Logical OR accumulator with x|A=(A \|\| x); F=A; A:(0\|1)|
+|EQ x      |Test whether A == x |A=(A == x); F=A; A:(0\|1)|
+|NE x      |Test whether A != x |A=(A != x); F=A; A:(0|1)|
+|GT x      |Test whether A > x  |A=(A > x); F=A; A:(0\|1)|
+|GE x      |Test whether A >= x |A=(A >= x); F=A; A:(0\|1)|
+|LT x      |Test whether A < x  |A=(A < x); F=A; A:(0\|1)|
+|LE x      |Test whether A <= x |A=(A <= x); F=A; A:(0\|1)|
+|NEG       |Flip sign of accumulator|A=-A; F=A|
+|NOT       |Bitwise NOT with accumulator|A=~A; F=A|
+|MI x1 x2  |Like M/MODES but with var/par/const int args|A=ret; F=A|
+|PUDI x1 x2|Like PUD but with var/par/const int args|A=ret; F=A|
 
 > Note: `A:(0|1)` means that `A` is either `0` or `1`, as demanded by C99.
 
-Currently, `NOTL`, `ANDL`, `ORL`, `EQ`, `NE`, `GT`, `GE`, `LT`, `LE` and `NEG` are implemented as CALLs to built-in functions which are dynamically added to the program by the compiler if needed. `LDAF` is (conceptually) in-lined as `LDA x; OR 0`, `NOT` is in-lined as `XOR 0xffffffff`. `BOOL` is not implemented.
+Currently, `NOTL`, `ANDL`, `ORL`, `EQ`, `NE`, `GT`, `GE`, `LT`, `LE` and `NEG` are implemented as CALLs to built-in functions which are dynamically added to the program by the compiler if needed. `LDAF` is (conceptually) in-lined as `LDA x; OR 0`, `NOT` is in-lined as `XOR 0xffffffff`.
 
 This work-around suffices to streamline the implementation of the 37 C99 operators listed above but has some disadvantages, it creates complexity in the compiler and reduces the amount of TAGs available to the program, and also causes a slight amount of clutter and redundant code in the produced assembly output.
 

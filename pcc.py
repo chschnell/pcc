@@ -698,12 +698,8 @@ class Pcc:
         node_term = self.try_parse_term(node)
         if node_term is not None:
             self.asm_out('LDA', node_term)
-        elif isinstance(node, c_ast.UnaryOp):
-            self._compile_UnaryOp_node(node)
-        elif isinstance(node, c_ast.BinaryOp):
-            self._compile_BinaryOp_node(node)
-        elif isinstance(node, c_ast.FuncCall):
-            self._compile_FuncCall_node(node)
+        elif isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.FuncCall)):
+            self.compile_statement(node)
         elif isinstance(node, c_ast.Assignment):
             self._compile_Assignment_node(node, in_expr=True)
         else:
