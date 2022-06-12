@@ -904,7 +904,7 @@ class Pcc:
             asm_cmd = func_sym.asm_repr()
             if asm_cmd == 'HALT':
                 returned = True
-            self.asm_out(asm_cmd, *args, comment='%s();' % func_name)
+            self.asm_out(asm_cmd, *args, comment='%s();' % func_name)               ## A := vm_api_func(); F := A
         else:
             ## compile call to user defined function
             function.caller.add(self.context_func_sym.cname)
@@ -912,7 +912,7 @@ class Pcc:
                 arg_expr_node = node.args.exprs[i_arg]
                 arg_asm_var = function.arg_vars[i_arg]
                 self.compile_assignment(arg_asm_var, arg_expr_node)
-            self.asm_out('CALL', func_sym.asm_repr(), comment='%s();' % func_name)
+            self.asm_out('CALL', func_sym.asm_repr(), comment='%s();' % func_name)  ## A := user_func(); F := undefined
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
         return returned

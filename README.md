@@ -167,8 +167,8 @@ This is already the case for all existing arithmetic and bitwise operators like 
 |LE x      |Test whether A <= x |A=(A <= x); F=A; A:(0\|1)|
 |NEG       |Flip sign of accumulator|A=-A; F=A|
 |NOT       |Bitwise NOT with accumulator|A=~A; F=A|
-|MI x1 x2  |Like M/MODES but with var/par/const int args|A=ret; F=A|
-|PUDI x1 x2|Like PUD but with var/par/const int args|A=ret; F=A|
+|MI x1 x2  |Like M/MODES but with var/par/const int args|A=M(); F=A|
+|PUDI x1 x2|Like PUD but with var/par/const int args|A=PUD(); F=A|
 
 > Note: `A:(0|1)` means that `A` is either `0` or `1`, as demanded by C99.
 
