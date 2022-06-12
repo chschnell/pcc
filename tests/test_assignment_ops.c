@@ -155,8 +155,41 @@ int test_assignment_ops2(void)
     return 2;
 }
 
+int test_assignment_ops3()
+{
+    int a, b;
+
+    a = -1;
+    b = (a = 10);
+    if (a != b) {
+        return -1;
+    }
+    else if (a != 10) {
+        return -2;
+    }
+
+    b = (a += 10);
+    if (a != b) {
+        return -3;
+    }
+    else if (a != 20) {
+        return -4;
+    }
+
+    b += (a += 10);
+    if (a != 30) {
+        return -5;
+    }
+    else if (b != 50) {
+        return -6;
+    }
+
+    return 3;
+}
+
 void main()
 {
     p0 = test_assignment_ops1();
     p1 = test_assignment_ops2();
+    p2 = test_assignment_ops3();
 }
