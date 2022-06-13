@@ -164,21 +164,25 @@ enum {
     PI_CMD_INTERRUPTED   = -144, // Used by Python
     PI_NOT_ON_BCM2711    = -145, // not available on BCM2711
     PI_ONLY_ON_BCM2711   = -146, // only available on BCM2711
+};
 
-    /* mode */
-    PI_INPUT  = 0,
-    PI_OUTPUT = 1,
-    PI_ALT0   = 4,
-    PI_ALT1   = 5,
-    PI_ALT2   = 6,
-    PI_ALT3   = 7,
-    PI_ALT4   = 3,
-    PI_ALT5   = 2,
+enum {
+    /* gpioSetMode(): defined constant values for argument "unsigned mode" */
+    PI_INPUT  = 0,      // use GPIO as an input (for reading)
+    PI_OUTPUT = 1,      // use GPIO as an output (for writing)
+    PI_ALT0   = 4,      // use GPIO's alternate function 0
+    PI_ALT1   = 5,      // use GPIO's alternate function 1
+    PI_ALT2   = 6,      // use GPIO's alternate function 2
+    PI_ALT3   = 7,      // use GPIO's alternate function 3
+    PI_ALT4   = 3,      // use GPIO's alternate function 4
+    PI_ALT5   = 2,      // use GPIO's alternate function 5
+};
 
-    /* pud */
-    PI_PUD_OFF  = 0,
-    PI_PUD_DOWN = 1,
-    PI_PUD_UP   = 2,
+enum {
+    /* gpioSetPullUpDown(): defined constant values for argument "unsigned pud" */
+    PI_PUD_OFF  = 0,    // disable GPIO's pull-up/down (floating)
+    PI_PUD_DOWN = 1,    // enable GPIO's pull-down
+    PI_PUD_UP   = 2,    // enable GPIO's pull-up
 };
 
 /* Basic commands */
