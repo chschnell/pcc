@@ -23,30 +23,35 @@ class PccError(Exception):
 
 class AsmVar:
     def __init__(self, var_sym=None):
-        self.vm_var_id = None   ## None (unbound) or str "v0" ... "v149"
-        self.var_sym = var_sym  ## VmVariableSymbol var_sym, 1:1 relationship
-
-    def bind(self, vm_var_nr):
-        self.vm_var_id = 'v%d' % vm_var_nr
-
-    def __str__(self):
-        if self.vm_var_id is None:
-            raise Exception('internal error: unbound virtual variable!')
-        return self.vm_var_id
+        self.vm_var_id = None               ## None (unbound) or str "v0" ... "v149"
+        self.var_sym = var_sym              ## VmVariableSymbol var_sym, 1:1 relationship
+        self.unbound_id = None              ## str, fallback-id for unbound variables
 
     def format_decl_comment(self, c_sources):
         var_sym = self.var_sym
         coord = var_sym.decl_node.coord
         filename, row = c_sources.map_coord(coord.line)
         fqname = var_sym.cname
-        if var_sym.context_func_sym is not None:
-            fqname = '%s.%s' % (var_sym.context_func_sym.cname, fqname)
+        if var_sym.context_function is not None:
+            fqname = '%s.%s' % (var_sym.context_function.func_name, fqname)
         return '; %3s: %s:%s:%s: %s %s' % (self, PurePath(filename).name,
             row, coord.column, var_sym.ctype, fqname)
 
+    def bind(self, vm_var_nr):
+        self.vm_var_id = 'v%d' % vm_var_nr
+
+    _unbound_counter = 0
+    def __str__(self):
+        if self.vm_var_id is not None:
+            return self.vm_var_id
+        elif self.unbound_id is None:
+            AsmVar._unbound_counter += 1
+            self.unbound_id = '<UNBOUND_VARIABLE_%d>' % AsmVar._unbound_counter
+        return self.unbound_id
+
 class AsmStatement:
     def __init__(self, comment=None):
-        self.comment = comment  ## None or str, optional comment
+        self.comment = comment              ## None or str, optional comment
 
     def format_statement(self, indent):
         raise NotImplementedError()
@@ -54,7 +59,8 @@ class AsmStatement:
 class AsmTag(AsmStatement):
     def __init__(self):
         super().__init__()
-        self.vm_tag_id = None   ## None (unbound) or str "1", "2", ..., any unique positive integer
+        self.vm_tag_id = None               ## None (unbound) or str "1", "2", ..., any unique positive integer
+        self.unbound_id = None              ## str, fallback-id for unbound TAG labels
 
     def format_statement(self, indent):
         return 'TAG %s' % self
@@ -62,49 +68,60 @@ class AsmTag(AsmStatement):
     def bind(self, vm_tag_id):
         self.vm_tag_id = str(vm_tag_id)
 
+    _unbound_counter = 0
     def __str__(self):
-        if self.vm_tag_id is None:
-            raise Exception('internal error: unbound virtual tag!')
-        return self.vm_tag_id
+        if self.vm_tag_id is not None:
+            return self.vm_tag_id
+        elif self.unbound_id is None:
+            AsmTag._unbound_counter += 1
+            self.unbound_id = '<UNBOUND_LABEL_%d>' % AsmTag._unbound_counter
+        return self.unbound_id
 
 class AsmCmd(AsmStatement):
-    def __init__(self, cmd, args, comment):
+    def __init__(self, instr, args, comment):
         super().__init__(comment=comment)
-        self.cmd = cmd          ## str, uppercase assembly language command
-        self.args = args        ## list(arg), command's arguments of type int, str, AsmVar or AsmTag
+        self.instr = instr                  ## str, uppercase assembly language instruction
+        self.args = args                    ## list(arg), command's arguments of type int, str, AsmVar or AsmTag
 
     def format_statement(self, indent):
-        return '%s%-5s %s' % (indent, self.cmd, ' '.join([str(arg) for arg in self.args]))
+        return '%s%-5s %s' % (indent, self.instr, ' '.join([str(arg) for arg in self.args]))
+
+    @staticmethod
+    def tag_instr_idx(instr):
+        try:
+            return ('TAG', 'CALL', 'JMP', 'JNZ', 'JZ', 'JP', 'JM').index(instr)
+        except ValueError:
+            return -1
 
 class AsmBranchCmd(AsmCmd):
     pass
 
 class AsmBuffer:
     def __init__(self):
-        self.stmt_buf = []      ## list(AsmStatement asm_stmt)
+        self.stmt_buf = []                  ## list(AsmStatement asm_stmt)
 
-    def __call__(self, cmd, *args, comment=None):
-        cmd = cmd.upper()
-        is_tag_cmd = cmd == 'TAG'
-        is_branch_cmd = cmd in ('CALL', 'JMP', 'JNZ', 'JZ', 'JP', 'JM')
-        if (is_branch_cmd or is_tag_cmd) and (len(args) != 1 or not isinstance(args[0], AsmTag)):
-            raise Exception('internal error: %s expects AsmTag argument, given "%s"' % (cmd, ' '.join(args)))
-        if is_tag_cmd:
+    def __call__(self, instr, *args, comment=None):
+        instr = instr.upper()
+        tag_instr_idx = AsmCmd.tag_instr_idx(instr)
+        if tag_instr_idx < 0:               ## any instruction that doesn't expect a single TAG label argument
+            asm_stmt = AsmCmd(instr, list(args), comment)
+        elif len(args) != 1 or not isinstance(args[0], AsmTag):
+            raise Exception('internal error: instruction %s expects a single AsmTag argument, given: "%s"' % (instr, ' '.join(args)))
+        elif tag_instr_idx == 0:            ## TAG <label> instruction (use AsmTag <label> as statement object)
             asm_stmt = args[0]
-            asm_stmt.comment = comment
-        elif is_branch_cmd:
-            asm_stmt = AsmBranchCmd(cmd, list(args), comment)
-        else:
-            asm_stmt = AsmCmd(cmd, list(args), comment)
+            if comment is not None:
+                asm_stmt.comment = comment
+        else:                               ## BRANCH <label> instruction (BRANCH one of JMP, JNZ, ...)
+            asm_stmt = AsmBranchCmd(instr, list(args), comment)
         self.stmt_buf.append(asm_stmt)
 
     def extend(self, asm_buffer):
         self.stmt_buf.extend(asm_buffer.stmt_buf)
 
-    def replace_cmd(self, find_cmd, replace_cmd):
+    def replace_instruction(self, find_instr, replace_instr):
         for asm_cmd in self.stmt_buf:
-            if isinstance(asm_cmd, AsmCmd) and asm_cmd.cmd == find_cmd:
-                asm_cmd.cmd = replace_cmd
+            if isinstance(asm_cmd, AsmCmd) and asm_cmd.instr == find_instr:
+                asm_cmd.instr = replace_instr
 
     def _replace_tag(self, find_tag, replace_tag):
         for asm_cmd in self.stmt_buf:
@@ -117,21 +134,21 @@ class AsmBuffer:
         for curr_stmt in in_buf[1:]:
             prev_stmt = out_buf[-1]
             if isinstance(prev_stmt, AsmCmd) and isinstance(curr_stmt, AsmCmd):
-                if prev_stmt.cmd == 'RET' and curr_stmt.cmd == 'RET':
+                if prev_stmt.instr == 'RET' and curr_stmt.instr == 'RET':
                     ## "RET + <RET>" => drop "RET", keep "<RET>"
                     continue
-                elif prev_stmt.cmd == 'JMP' and curr_stmt.cmd == 'JMP':
+                elif prev_stmt.instr == 'JMP' and curr_stmt.instr == 'JMP':
                     ## "JMP X + <JMP Y>" => drop "JMP Y", keep "<JMP X>"
                     continue
-                elif prev_stmt.cmd == 'STA' and curr_stmt.cmd == 'LDA' and prev_stmt.args[0] == curr_stmt.args[0]:
+                elif prev_stmt.instr == 'STA' and curr_stmt.instr == 'LDA' and prev_stmt.args[0] == curr_stmt.args[0]:
                     ## "STA X + <LDA X>" => drop "<LDA Y>", keep "STA X"
                     continue
             elif isinstance(prev_stmt, AsmTag) and isinstance(curr_stmt, AsmTag):
                 ## "TAG X + <TAG Y>" => replace all uses of "Y" with "X", keep "TAG X", drop "TAG Y"
                 self._replace_tag(curr_stmt, prev_stmt)
                 continue
-            elif isinstance(prev_stmt, AsmTag) and isinstance(curr_stmt, AsmCmd) and curr_stmt.cmd == 'JMP':
-                if len(out_buf) > 2 and isinstance(out_buf[-2], AsmCmd) and out_buf[-2].cmd == 'JMP':
+            elif isinstance(prev_stmt, AsmTag) and isinstance(curr_stmt, AsmCmd) and curr_stmt.instr == 'JMP':
+                if len(out_buf) > 2 and isinstance(out_buf[-2], AsmCmd) and out_buf[-2].instr == 'JMP':
                     ## "JMP Z + TAG X + <JMP Y>" => replace all uses of "X" with "Y", drop both "TAG X" and "<JMP Y>"
                     self._replace_tag(prev_stmt, curr_stmt.args[0])
                     del out_buf[-1]
@@ -142,7 +159,7 @@ class AsmBuffer:
                     out_buf[-1] = curr_stmt
                     continue
             elif isinstance(prev_stmt, AsmCmd) and isinstance(curr_stmt, AsmTag):
-                if prev_stmt.cmd == 'JMP' and prev_stmt.args[0] == curr_stmt:
+                if prev_stmt.instr == 'JMP' and prev_stmt.args[0] == curr_stmt:
                     ## "JMP X + <TAG X>" => drop "JMP X", keep "<TAG X>"
                     out_buf[-1] = curr_stmt
                     continue
@@ -179,7 +196,7 @@ class AsmBuffer:
             if isinstance(asm_cmd, AsmCmd):
                 for asm_var in asm_cmd.args:
                     if isinstance(asm_var, AsmVar):
-                        if asm_var.var_sym.context_func_sym is None:
+                        if asm_var.var_sym.context_function is None:
                             global_asm_vars[asm_var] = True
                         else:
                             local_asm_vars[asm_var] = True
@@ -236,7 +253,7 @@ class Function:
         raise PccError(node.type, 'unsupported type')
 
 class VmApiFunction(Function):
-    VM_FUNCTION_CMD = {
+    VM_FUNCTION_INSTR = {
         'gpioSetMode':                  'MODES',    ## Basic commands
         'gpioGetMode':                  'MODEG',
         'gpioSetPullUpDown':            'PUD',
@@ -294,9 +311,9 @@ class VmApiFunction(Function):
 
     def __init__(self, decl_node):
         super().__init__(decl_node, True)
-        if self.func_name not in self.VM_FUNCTION_CMD:
+        if self.func_name not in self.VM_FUNCTION_INSTR:
             raise PccError(node, 'undefined VM function name "%s"' % self.func_name)
-        self.vm_func_cmd = self.VM_FUNCTION_CMD[self.func_name]
+        self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
         self.map_argument = getattr(self, '_map_argument_%s' % self.func_name, self._map_argument_default)
 
     def _map_argument_default(self, node, i_arg, const_arg):
@@ -343,6 +360,7 @@ class UserDefFunction(Function):
         self.asm_buf = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
         self.arg_vars = [               ## list(AsmVar), function argument VM variables
             AsmVar() for i in range(self.arg_count)]
+        self.static_asm_tags = {}       ## dict(str tag_label: AsmTag asm_tag), user-defined static tags
 
 ## ---------------------------------------------------------------------------
 
@@ -367,10 +385,10 @@ class VariableSymbol(AbstractSymbol):
         self.ctype = ctype
 
 class VmVariableSymbol(VariableSymbol):
-    def __init__(self, ctype, cname, decl_node, context_func_sym, asm_var):
+    def __init__(self, ctype, cname, decl_node, context_function, asm_var):
         super().__init__(ctype, cname)
         self.decl_node = decl_node
-        self.context_func_sym = context_func_sym
+        self.context_function = context_function
         if asm_var is None:
             self.asm_var = AsmVar(var_sym=self)
         else:
@@ -400,8 +418,8 @@ class UserDefFunctionSymbol(FunctionSymbol):
         return self.function.asm_tag
 
 class VmApiFunctionSymbol(FunctionSymbol):
-    def asm_repr(self):                 ## str vm_func_cmd, VM's special function command name
-        return self.function.vm_func_cmd
+    def asm_repr(self):                 ## str vm_func_instr, VM function's assembly language instruction
+        return self.function.vm_func_instr
 
 ## ---------------------------------------------------------------------------
 
@@ -457,7 +475,7 @@ class Pcc:
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
         self.functions = {}                 ## dict(str func_name: Function function), user-defined and VM API functions
         self.helper_functions = {}          ## dict(str func_name: HelperFunction helper_function), internal helper functions
-        self.context_func_sym = None        ## None or UserDefFunctionSymbol, current function context
+        self.context_function = None        ## None or UserDefFunction, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
@@ -493,21 +511,21 @@ class Pcc:
 
     ## Private functions
 
-    def log_error(self, e, context_func_sym=None):
-        self._log_message(e.node, 'error: %s' % str(e), context_func_sym)
+    def log_error(self, e, context_function=None):
+        self._log_message(e.node, 'error: %s' % str(e), context_function)
         if e.node is not None and self.debug:
             print('Extra debug node information:\n' + str(e.node), file=sys.stderr)
         self.error_count += 1
 
-    def log_warning(self, node, message, context_func_sym):
-        self._log_message(node, 'warning: %s' % message, context_func_sym)
+    def log_warning(self, node, message, context_function):
+        self._log_message(node, 'warning: %s' % message, context_function)
 
-    def _log_message(self, node, message, context_func_sym):
+    def _log_message(self, node, message, context_function):
         if node is None:
             print(message, file=sys.stderr)
         else:
             flat_row, col = node.coord.line, node.coord.column
-            func_name = context_func_sym.cname if context_func_sym is not None else None
+            func_name = context_function.func_name if context_function is not None else None
             print(self.c_sources.format_src_message(flat_row, col, message, ctx_func_name=func_name), file=sys.stderr)
 
     def push_scope(self):
@@ -552,7 +570,7 @@ class Pcc:
             self.bind_symbol(enum_node, EnumSymbol(enum_node.name, enum_value))
 
     def declare_variable(self, node, ctype, cname, asm_var=None):
-        return self.bind_symbol(node, VmVariableSymbol(ctype, cname, node, self.context_func_sym, asm_var))
+        return self.bind_symbol(node, VmVariableSymbol(ctype, cname, node, self.context_function, asm_var))
 
     def declare_parameter(self, node, ctype, cname):
         m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
@@ -586,7 +604,7 @@ class Pcc:
 
     def try_parse_constant(self, node):
         result = None
-        if isinstance(node, c_ast.Constant):
+        if isinstance(node, c_ast.Constant) and node.type == 'int':
             result = node.value
         elif isinstance(node, c_ast.ID):
             enum_sym = self.find_symbol(node.name, filter=EnumSymbol)
@@ -667,7 +685,7 @@ class Pcc:
             if do_reduce:
                 asm_buf.reduce()
         ## merge main() function body into init segment
-        main_function.asm_buf.replace_cmd('RET', 'HALT')
+        main_function.asm_buf.replace_instruction('RET', 'HALT')
         self.asm_buf.extend(main_function.asm_buf)
         return [self.asm_buf] + userdef_asm_bufs[1:] + [h.asm_buf for h in self.helper_functions.values()]
 
@@ -736,7 +754,7 @@ class Pcc:
             raise PccError(node, 'redefinition of "%s"' % func_sym.cname)
         function.impl_node = node
         ## enter function context
-        self.context_func_sym = func_sym
+        self.context_function = function
         self.asm_out = function.asm_buf
         self.push_scope()
         try:
@@ -758,12 +776,45 @@ class Pcc:
                         function.decl_str(), func_sym)
                 self.asm_out('RET')
         except PccError as e:
-            self.log_error(e, context_func_sym=func_sym)
+            self.log_error(e, context_function=function)
         finally:
             self.pop_scope()
             self.asm_out = self.asm_buf
-            self.context_func_sym = None
+            self.context_function = None
         return func_sym
+
+    def compile_asm_statement(self, node):
+        if node.args is None or not isinstance(node.args, c_ast.ExprList) or len(node.args.exprs) == 0:
+            return False
+        ## parse arguments into instr_args[]
+        instr_args = []
+        is_1st_arg_str = False
+        for i_arg, arg_expr in enumerate(node.args.exprs):
+            arg_term = self.try_parse_term(arg_expr)
+            if arg_term is None and isinstance(arg_expr, c_ast.Constant) and arg_expr.type == 'string':
+                arg_term = bytes(arg_expr.value[1:-1], 'utf-8').decode('unicode_escape')
+                if i_arg == 0:
+                    is_1st_arg_str = True
+            if arg_term is None:
+                raise PccError(arg_expr, 'asm() expects arguments to be variables, int or string constants')
+            instr_args.append(arg_term)
+        if not is_1st_arg_str:
+            raise PccError(node.args.exprs[0], 'asm() expects first argument to be a string constant')
+        instr = instr_args.pop(0).upper()
+        ## replace user-defined static TAG labels with AsmTag objects
+        if AsmCmd.tag_instr_idx(instr) >= 0:
+            if len(instr_args) != 1:
+                raise PccError(node, '%s expects a single tag label argument' % instr)
+            context_function = self.context_function
+            tag_label = instr_args[0]
+            static_tag = context_function.static_asm_tags.get(tag_label, None)
+            if static_tag is None:
+                static_tag = AsmTag()
+                context_function.static_asm_tags[tag_label] = static_tag
+            instr_args[0] = static_tag
+        ## append raw assembler statement to current buffer
+        self.asm_out(instr, *instr_args)
+        return instr in ('RET', 'HALT')
 
     def compile_statement(self, node):
         ast_class_name = node.__class__.__name__
@@ -877,8 +928,10 @@ class Pcc:
         return False
 
     def _compile_FuncCall_node(self, node, dst_reg=None):
-        returned = False
         func_name = node.name.name
+        if func_name == 'asm':
+            return self.compile_asm_statement(node)
+        returned = False
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
             raise PccError(node, 'function "%s" undeclared' % func_name)
@@ -901,13 +954,14 @@ class Pcc:
                     arg_term = ARG_REGS[i_arg]
                     self.compile_assignment(arg_term, arg_expr_node)
                 args.append(arg_term)
-            asm_cmd = func_sym.asm_repr()
-            if asm_cmd == 'HALT':
+            asm_instr = func_sym.asm_repr()
+            if asm_instr == 'HALT':
                 returned = True
-            self.asm_out(asm_cmd, *args, comment='%s();' % func_name)               ## A := vm_api_func(); F := A
+            self.asm_out(asm_instr, *args, comment='%s();' % func_name)             ## A := vm_api_func(); F := A
         else:
             ## compile call to user defined function
-            function.caller.add(self.context_func_sym.cname)
+            if function is not self.context_function:
+                function.caller.add(self.context_function.func_name)
             for i_arg in range(function.arg_count):
                 arg_expr_node = node.args.exprs[i_arg]
                 arg_asm_var = function.arg_vars[i_arg]
@@ -925,7 +979,7 @@ class Pcc:
                 in_unreachable_code = False
                 for statement_node in node.block_items:
                     if in_unreachable_code:
-                        self.log_warning(statement_node, 'unreachable code', self.context_func_sym)
+                        self.log_warning(statement_node, 'unreachable code', self.context_function)
                         break
                     try:
                         s_returned = self.compile_statement(statement_node)
@@ -934,20 +988,20 @@ class Pcc:
                         if s_returned or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
                             in_unreachable_code = True
                     except PccError as e:
-                        self.log_error(e, context_func_sym=self.context_func_sym)
+                        self.log_error(e, context_function=self.context_function)
             finally:
                 self.pop_scope()
         return returned
 
     def _compile_Return_node(self, node):
-        ret_val_expected = self.context_func_sym.function.has_return
+        ret_val_expected = self.context_function.has_return
         ret_val_given = node.expr is not None
         if not ret_val_expected and ret_val_given:
             self.log_warning(node, 'function "%s" does not return a value' %
-                self.context_func_sym.function.decl_str(), self.context_func_sym)
+                self.context_function.decl_str(), self.context_function)
         elif ret_val_expected and not ret_val_given:
             self.log_warning(node, 'function "%s" should return a value' %
-                self.context_func_sym.function.decl_str(), self.context_func_sym)
+                self.context_function.decl_str(), self.context_function)
         elif ret_val_given:
             self.compile_expression(node.expr)              ## A := {expr}; F := A
         self.asm_out('RET')
