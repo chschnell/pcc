@@ -751,14 +751,14 @@ class Pcc:
         func_sym = self.declare_function(node.decl)     ## UserDefFunctionSymbol func_sym
         function = func_sym.function
         if function.impl_node is not None:
-            raise PccError(node, 'redefinition of "%s"' % func_sym.cname)
+            raise PccError(node, 'redefinition of "%s"' % function.func_name)
         function.impl_node = node
         ## enter function context
         self.context_function = function
         self.asm_out = function.asm_buf
         self.push_scope()
         try:
-            if func_sym.cname != 'main':
+            if function.func_name != 'main':
                 self.asm_out('TAG', function.asm_tag, comment=function.decl_str())
             if function.arg_count > 0:
                 arg_vars = function.arg_vars
@@ -767,7 +767,7 @@ class Pcc:
                     arg_ctype = arg_ctypes[i_arg]
                     arg_cname = arg_param.name
                     if arg_cname is None:
-                        arg_cname = '.%s.%d' % (func_sym.cname, i_arg)
+                        arg_cname = '.%s.%d' % (function.func_name, i_arg)
                     self.declare_variable(node.body, arg_ctype, arg_cname, asm_var=arg_vars[i_arg])
             returned = self._compile_Compound_node(node.body)
             if not returned:
@@ -935,9 +935,9 @@ class Pcc:
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
             raise PccError(node, 'function "%s" undeclared' % func_name)
-        elif dst_reg is not None and not func_sym.function.has_return:
-            raise PccError(node, 'function "%s" declared without return value' % func_sym.function.decl_str())
         function = func_sym.function
+        if dst_reg is not None and not function.has_return:
+            raise PccError(node, 'function "%s" declared without return value' % function.decl_str())
         arg_count = len(node.args.exprs) if node.args is not None else 0
         if function.arg_count != arg_count:
             raise PccError(node, 'function "%s" expects %d argument(s) instead of %d' % (
