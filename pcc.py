@@ -312,7 +312,7 @@ class VmApiFunction(Function):
     def __init__(self, decl_node):
         super().__init__(decl_node, True)
         if self.func_name not in self.VM_FUNCTION_INSTR:
-            raise PccError(node, 'undefined VM function name "%s"' % self.func_name)
+            raise PccError(decl_node, 'undefined VM function name "%s"' % self.func_name)
         self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
         self.map_argument = getattr(self, '_map_argument_%s' % self.func_name, self._map_argument_default)
 
@@ -351,9 +351,9 @@ class UserDefFunction(Function):
         if self.func_name == 'main':
             ## check main() function prototype constraints
             if self.has_return:
-                raise PccError(node, 'return type other than "void" is not supported for main()')
+                raise PccError(decl_node, 'return type other than "void" is not supported for main()')
             elif self.arg_count > 0:
-                raise PccError(node, 'function arguments are not supported for main()')
+                raise PccError(decl_node, 'function arguments are not supported for main()')
         self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
         self.caller = set()             ## set(str func_name), set of calling function names
         self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
@@ -385,10 +385,8 @@ class VariableSymbol(AbstractSymbol):
         self.ctype = ctype
 
 class VmVariableSymbol(VariableSymbol):
-    def __init__(self, ctype, cname, decl_node, context_function, asm_var):
+    def __init__(self, ctype, cname, asm_var, decl_node, context_function):
         super().__init__(ctype, cname)
-        self.decl_node = decl_node
-        self.context_function = context_function
         if asm_var is None:
             self.asm_var = AsmVar(var_sym=self)
         else:
@@ -396,17 +394,19 @@ class VmVariableSymbol(VariableSymbol):
                 raise Exception('internal error: AsmVar is already bound to a VariableSymbol')
             asm_var.var_sym = self
             self.asm_var = asm_var
+        self.decl_node = decl_node
+        self.context_function = context_function
 
     def asm_repr(self):                 ## AsmVar asm_var, str() expands to VM variable name ("vN")
         return self.asm_var
 
 class VmParameterSymbol(VariableSymbol):
-    def __init__(self, ctype, cname, vm_param_id):
+    def __init__(self, ctype, cname, asm_par):
         super().__init__(ctype, cname)
-        self.vm_param_id = vm_param_id
+        self.asm_par = asm_par
 
-    def asm_repr(self):                 ## str vm_param_id, VM parameter name ("pN")
-        return self.vm_param_id
+    def asm_repr(self):                 ## str asm_par, VM parameter name ("pN")
+        return self.asm_par
 
 class FunctionSymbol(AbstractSymbol):
     def __init__(self, cname, function):
@@ -570,7 +570,7 @@ class Pcc:
             self.bind_symbol(enum_node, EnumSymbol(enum_node.name, enum_value))
 
     def declare_variable(self, node, ctype, cname, asm_var=None):
-        return self.bind_symbol(node, VmVariableSymbol(ctype, cname, node, self.context_function, asm_var))
+        return self.bind_symbol(node, VmVariableSymbol(ctype, cname, asm_var, node, self.context_function))
 
     def declare_parameter(self, node, ctype, cname):
         m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
@@ -634,10 +634,8 @@ class Pcc:
         ## compile top-level declarations and user-defined functions
         for node in root_node:
             try:
-                if isinstance(node, c_ast.Decl):
-                    self._compile_Decl_node(node)
-                elif isinstance(node, c_ast.FuncDef):
-                    self.compile_function_definition(node)
+                if isinstance(node, (c_ast.Decl, c_ast.FuncDef)):
+                    self.compile_statement(node)
                 else:
                     raise PccError(node, 'unsupported syntax')
             except PccError as e:
@@ -747,42 +745,6 @@ class Pcc:
         else:
             raise PccError(rhs_node, 'unsupported assignment operator "%s"' % assign_op)
 
-    def compile_function_definition(self, node):
-        func_sym = self.declare_function(node.decl)     ## UserDefFunctionSymbol func_sym
-        function = func_sym.function
-        if function.impl_node is not None:
-            raise PccError(node, 'redefinition of "%s"' % function.func_name)
-        function.impl_node = node
-        ## enter function context
-        self.context_function = function
-        self.asm_out = function.asm_buf
-        self.push_scope()
-        try:
-            if function.func_name != 'main':
-                self.asm_out('TAG', function.asm_tag, comment=function.decl_str())
-            if function.arg_count > 0:
-                arg_vars = function.arg_vars
-                arg_ctypes = function.arg_ctypes
-                for i_arg, arg_param in enumerate(node.decl.type.args.params):
-                    arg_ctype = arg_ctypes[i_arg]
-                    arg_cname = arg_param.name
-                    if arg_cname is None:
-                        arg_cname = '.%s.%d' % (function.func_name, i_arg)
-                    self.declare_variable(node.body, arg_ctype, arg_cname, asm_var=arg_vars[i_arg])
-            returned = self._compile_Compound_node(node.body)
-            if not returned:
-                if function.has_return:
-                    self.log_warning(node, 'function "%s" should return a value' %
-                        function.decl_str(), func_sym)
-                self.asm_out('RET')
-        except PccError as e:
-            self.log_error(e, context_function=function)
-        finally:
-            self.pop_scope()
-            self.asm_out = self.asm_buf
-            self.context_function = None
-        return func_sym
-
     def compile_asm_statement(self, node):
         if node.args is None or not isinstance(node.args, c_ast.ExprList) or len(node.args.exprs) == 0:
             return False
@@ -882,6 +844,50 @@ class Pcc:
                 self.asm_out(binary_op, SCR0)       ## A := A <binary_op> SCR0, F := A
         return False
 
+    def _compile_Assignment_node(self, node, in_expr=False):
+        lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
+        if lhs_sym is None:
+            raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
+        lhs_reg = lhs_sym.asm_repr()
+        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op, in_expr=in_expr)
+        return False
+
+    def _compile_Compound_node(self, node):
+        returned = False
+        if node.block_items is not None:
+            self.push_scope()
+            try:
+                in_unreachable_code = False
+                for statement_node in node.block_items:
+                    if in_unreachable_code:
+                        self.log_warning(statement_node, 'unreachable code', self.context_function)
+                        break
+                    try:
+                        s_returned = self.compile_statement(statement_node)
+                        if s_returned:
+                            returned = True
+                        if s_returned or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
+                            in_unreachable_code = True
+                    except PccError as e:
+                        self.log_error(e, context_function=self.context_function)
+            finally:
+                self.pop_scope()
+        return returned
+
+    def _compile_Return_node(self, node):
+        ret_val_expected = self.context_function.has_return
+        ret_val_given = node.expr is not None
+        if not ret_val_expected and ret_val_given:
+            self.log_warning(node, 'function "%s" does not return a value' %
+                self.context_function.decl_str(), self.context_function)
+        elif ret_val_expected and not ret_val_given:
+            self.log_warning(node, 'function "%s" should return a value' %
+                self.context_function.decl_str(), self.context_function)
+        elif ret_val_given:
+            self.compile_expression(node.expr)              ## A := {expr}; F := A
+        self.asm_out('RET')
+        return True
+
     def _compile_Decl_node(self, node):
         if len(node.align) != 0 or node.bitsize is not None or len(node.funcspec) != 0:
             raise PccError(node, 'unsupported declaration syntax')
@@ -919,12 +925,40 @@ class Pcc:
             raise PccError(node, 'unsupported declaration syntax')
         return False
 
-    def _compile_Assignment_node(self, node, in_expr=False):
-        lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
-        if lhs_sym is None:
-            raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
-        lhs_reg = lhs_sym.asm_repr()
-        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op, in_expr=in_expr)
+    def _compile_FuncDef_node(self, node):
+        func_sym = self.declare_function(node.decl)     ## UserDefFunctionSymbol func_sym
+        function = func_sym.function
+        if function.impl_node is not None:
+            raise PccError(node, 'redefinition of "%s"' % function.func_name)
+        function.impl_node = node
+        ## enter function context
+        self.context_function = function
+        self.asm_out = function.asm_buf
+        self.push_scope()
+        try:
+            if function.func_name != 'main':
+                self.asm_out('TAG', function.asm_tag, comment=function.decl_str())
+            if function.arg_count > 0:
+                arg_vars = function.arg_vars
+                arg_ctypes = function.arg_ctypes
+                for i_arg, arg_param in enumerate(node.decl.type.args.params):
+                    arg_ctype = arg_ctypes[i_arg]
+                    arg_cname = arg_param.name
+                    if arg_cname is None:
+                        arg_cname = '.%s.%d' % (function.func_name, i_arg)
+                    self.declare_variable(node.body, arg_ctype, arg_cname, asm_var=arg_vars[i_arg])
+            returned = self._compile_Compound_node(node.body)
+            if not returned:
+                if function.has_return:
+                    self.log_warning(node, 'function "%s" should return a value' %
+                        function.decl_str(), func_sym)
+                self.asm_out('RET')
+        except PccError as e:
+            self.log_error(e, context_function=function)
+        finally:
+            self.pop_scope()
+            self.asm_out = self.asm_buf
+            self.context_function = None
         return False
 
     def _compile_FuncCall_node(self, node, dst_reg=None):
@@ -970,42 +1004,6 @@ class Pcc:
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
         return returned
-
-    def _compile_Compound_node(self, node):
-        returned = False
-        if node.block_items is not None:
-            self.push_scope()
-            try:
-                in_unreachable_code = False
-                for statement_node in node.block_items:
-                    if in_unreachable_code:
-                        self.log_warning(statement_node, 'unreachable code', self.context_function)
-                        break
-                    try:
-                        s_returned = self.compile_statement(statement_node)
-                        if s_returned:
-                            returned = True
-                        if s_returned or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
-                            in_unreachable_code = True
-                    except PccError as e:
-                        self.log_error(e, context_function=self.context_function)
-            finally:
-                self.pop_scope()
-        return returned
-
-    def _compile_Return_node(self, node):
-        ret_val_expected = self.context_function.has_return
-        ret_val_given = node.expr is not None
-        if not ret_val_expected and ret_val_given:
-            self.log_warning(node, 'function "%s" does not return a value' %
-                self.context_function.decl_str(), self.context_function)
-        elif ret_val_expected and not ret_val_given:
-            self.log_warning(node, 'function "%s" should return a value' %
-                self.context_function.decl_str(), self.context_function)
-        elif ret_val_given:
-            self.compile_expression(node.expr)              ## A := {expr}; F := A
-        self.asm_out('RET')
-        return True
 
     def _compile_If_node(self, node):
         else_tag = AsmTag() if node.iffalse is not None else None
@@ -1296,7 +1294,7 @@ def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
 def main():
     parser = argparse.ArgumentParser(description='pcc - PIGS C compiler')
     parser.add_argument('filenames', metavar='C_FILE', nargs='+', help='filenames to parse')
-    parser.add_argument('-o', metavar='FILE', help='place the output into FILE ("-" for STDOUT)')
+    parser.add_argument('-o', dest='out_filename', metavar='FILE', help='place the output into FILE ("-" for STDOUT)')
     parser.add_argument('-c', dest='comments', action='store_true', help='add comments to asm output')
     parser.add_argument('-n', dest='no_reduce', action='store_true', help='do not reduce asm output')
     parser.add_argument('-d', dest='debug', action='store_true', help='add debug output to error messages')
@@ -1305,7 +1303,7 @@ def main():
     cc = pcc(args.filenames, debug=args.debug, do_reduce=not args.no_reduce)
     if cc is None:
         return -1
-    out_filename = args.o
+    out_filename = args.out_filename
     if out_filename is None:
         out_filename = PurePath(args.filenames[-1]).stem + '.s'
     if out_filename == '-':

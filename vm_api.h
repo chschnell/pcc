@@ -255,8 +255,8 @@ extern unsigned gpioCfgGetInternals(void);
 extern int gpioCfgSetInternals(unsigned cfgVal);
 
 /* Script exclusive commands */
-extern unsigned gpioWait(unsigned gpio_bits);   // WAIT x
-extern unsigned eventWait(void);                // EVTWT
+extern unsigned gpioWait(unsigned gpioBits);    // WAIT x
+extern unsigned eventWait(unsigned eventBits);  // EVTWT x
 extern void exit(void);                         // HALT
 
 /* Script I/O parameter */
