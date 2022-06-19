@@ -185,6 +185,15 @@ enum {
     PI_PUD_UP   = 2,    // enable GPIO's pull-up
 };
 
+enum {
+    /* gpioCfgSetInternals(): defined constant values for argument "unsigned cfgVal" */
+    PI_CFG_DBG_LEVEL    = 0x0,      // bits 0-3
+    PI_CFG_ALERT_FREQ   = 0x4,      // bits 4-7
+    PI_CFG_RT_PRIORITY  = 0x100,    // (1<<8)
+    PI_CFG_STATS        = 0x200,    // (1<<9)
+    PI_CFG_NOSIGHANDLER = 0x400,    // (1<<10)
+};
+
 /* Basic commands */
 extern int gpioSetMode(unsigned gpio, unsigned mode);
 extern int gpioGetMode(unsigned gpio);

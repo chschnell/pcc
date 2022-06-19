@@ -11,9 +11,6 @@ from pycparser import c_ast
 from pycparser.c_parser import CParser
 from pycparser.plyparser import ParseError
 
-SCR0     = 'v0'               ## General purpose (scratch) register
-ARG_REGS = ('v1', 'v2', 'v3') ## Function argument register (ARG0 ... ARG2)
-
 class PccError(Exception):
     def __init__(self, node, message):
         super().__init__(message)
@@ -424,27 +421,30 @@ class VmApiFunctionSymbol(FunctionSymbol):
 ## ---------------------------------------------------------------------------
 
 class Pcc:
+    SCR0     = 'v0'                         ## General purpose (scratch) register
+    ARG_REGS = ('v1', 'v2', 'v3')           ## Function argument register (ARG0 ... ARG2)
+
     VM_BINARY_ARITHMETIC_OP = {
-        '+':  'ADD',    ## A+=x; F=A
-        '-':  'SUB',    ## A-=x; F=A
-        '*':  'MLT',    ## A*=x; F=A
-        '/':  'DIV',    ## A/=x; F=A
-        '%':  'MOD',    ## A%=x; F=A
-        '&':  'AND',    ## A&=x; F=A
-        '|':  'OR',     ## A|=x; F=A
-        '^':  'XOR',    ## A^=x; F=A
-        '<<': 'RLA',    ## A<<=x; F=A
-        '>>': 'RRA' }   ## A>>=x; F=A
+        '+':  'ADD',                        ## A+=x; F=A
+        '-':  'SUB',                        ## A-=x; F=A
+        '*':  'MLT',                        ## A*=x; F=A
+        '/':  'DIV',                        ## A/=x; F=A
+        '%':  'MOD',                        ## A%=x; F=A
+        '&':  'AND',                        ## A&=x; F=A
+        '|':  'OR',                         ## A|=x; F=A
+        '^':  'XOR',                        ## A^=x; F=A
+        '<<': 'RLA',                        ## A<<=x; F=A
+        '>>': 'RRA' }                       ## A>>=x; F=A
 
     VM_BINARY_LOGICAL_OP = {
-        '&&': 'ANDL',   ## A=(A && SCR0); A:(0|1)
-        '||': 'ORL',    ## A=(A || SCR0); A:(0|1)
-        '==': 'EQ',     ## A=(A == SCR0); A:(0|1)
-        '!=': 'NE',     ## A=(A != SCR0); A:(0|1)
-        '>':  'GT',     ## A=(A  > SCR0); A:(0|1)
-        '>=': 'GE',     ## A=(A >= SCR0); A:(0|1)
-        '<':  'LT',     ## A=(A  < SCR0); A:(0|1)
-        '<=': 'LE' }    ## A=(A <= SCR0); A:(0|1)
+        '&&': 'ANDL',                       ## A=(A && SCR0); A:(0|1)
+        '||': 'ORL',                        ## A=(A || SCR0); A:(0|1)
+        '==': 'EQ',                         ## A=(A == SCR0); A:(0|1)
+        '!=': 'NE',                         ## A=(A != SCR0); A:(0|1)
+        '>':  'GT',                         ## A=(A  > SCR0); A:(0|1)
+        '>=': 'GE',                         ## A=(A >= SCR0); A:(0|1)
+        '<':  'LT',                         ## A=(A  < SCR0); A:(0|1)
+        '<=': 'LE' }                        ## A=(A <= SCR0); A:(0|1)
 
     HELPER_FUNCTION_DESCR = {
         'NEG':  'int NEG(): A=-A; F=A',
@@ -701,7 +701,7 @@ class Pcc:
         for asm_buf in all_asm_bufs:
             asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
         all_asm_vars = list(global_asm_vars.keys()) + list(local_asm_vars.keys())
-        var_count = 1 + len(ARG_REGS)
+        var_count = 1 + len(self.ARG_REGS)
         for asm_var in all_asm_vars:
             asm_var.bind(var_count)
             var_count += 1
@@ -738,9 +738,9 @@ class Pcc:
                 self.asm_out('LDA', dst_reg)                        ## A := dest_reg
                 self.asm_out(binary_op, rhs_term)                   ## A := A <binary-op> {rhs-term}; F := A
             else:
-                self.compile_expression(rhs_node, dst_reg=SCR0)     ## SCR0 := {rhs-expr}; A := SCR0; F := undefined
+                self.compile_expression(rhs_node, dst_reg=self.SCR0) ## SCR0 := {rhs-expr}; A := SCR0; F := undefined
                 self.asm_out('LDA', dst_reg)                        ## A := dest_reg
-                self.asm_out(binary_op, SCR0)                       ## A := A <binary-op> SCR0; F := A
+                self.asm_out(binary_op, self.SCR0)                  ## A := A <binary-op> SCR0; F := A
             self.asm_out('STA', dst_reg)                            ## dst_reg := A
         else:
             raise PccError(rhs_node, 'unsupported assignment operator "%s"' % assign_op)
@@ -791,29 +791,29 @@ class Pcc:
             if reg_sym is None:
                 raise PccError(node.expr, 'variable "%s" undeclared' % node.expr.name)
             vm_reg = reg_sym.asm_repr()
-            if node.op == '++':                     ## Prefix increment "++X":
-                self.asm_out('INR', vm_reg)         ## ++X, F := X
-                self.asm_out('LDA', vm_reg)         ## A := X, F := A
-            elif node.op == '--':                   ## Prefix deccrement "--X":
-                self.asm_out('DCR', vm_reg)         ## --X, F := X
-                self.asm_out('LDA', vm_reg)         ## A := X, F := A
-            elif node.op == 'p++':                  ## Postfix increment "X++":
-                self.asm_out('LD', SCR0, vm_reg)    ## SCR0 := X
-                self.asm_out('INR', vm_reg)         ## ++X, F := X
-                self.asm_out('LDA', SCR0)           ## A := SCR0, F := (A - 1)!
-            elif node.op == 'p--':                  ## Postfix decrement "X--":
-                self.asm_out('LD', SCR0, vm_reg)    ## SCR0 := X
-                self.asm_out('DCR', vm_reg)         ## --X, F := X
-                self.asm_out('LDA', SCR0)           ## A := SCR0
+            if node.op == '++':                         ## Prefix increment "++X":
+                self.asm_out('INR', vm_reg)             ## ++X, F := X
+                self.asm_out('LDA', vm_reg)             ## A := X, F := A
+            elif node.op == '--':                       ## Prefix deccrement "--X":
+                self.asm_out('DCR', vm_reg)             ## --X, F := X
+                self.asm_out('LDA', vm_reg)             ## A := X, F := A
+            elif node.op == 'p++':                      ## Postfix increment "X++":
+                self.asm_out('LD', self.SCR0, vm_reg)   ## SCR0 := X
+                self.asm_out('INR', vm_reg)             ## ++X, F := X
+                self.asm_out('LDA', self.SCR0)          ## A := SCR0, F := (A - 1)!
+            elif node.op == 'p--':                      ## Postfix decrement "X--":
+                self.asm_out('LD', self.SCR0, vm_reg)   ## SCR0 := X
+                self.asm_out('DCR', vm_reg)             ## --X, F := X
+                self.asm_out('LDA', self.SCR0)          ## A := SCR0
         elif node.op in ('!', '~', '+', '-'):
             self.compile_expression(node.expr)
-            if node.op == '-':                      ## flip sign: NEG()
+            if node.op == '-':                          ## flip sign: NEG()
                 self.compile_helper_function_call(node, 'NEG')
-            elif node.op == '!':                    ## logical NOT: NOTL()
+            elif node.op == '!':                        ## logical NOT: NOTL()
                 self.compile_helper_function_call(node, 'NOTL')
-            elif node.op == '~':                    ## bitwise NOT: NOT(), inline
-                self.asm_out('XOR', '0xffffffff')   ## A := A ^ 0xffffffff; F := A
-            elif node.op == '+':                    ## A := +A (NOP)
+            elif node.op == '~':                        ## bitwise NOT: NOT(), inline
+                self.asm_out('XOR', '0xffffffff')       ## A := A ^ 0xffffffff; F := A
+            elif node.op == '+':                        ## A := +A (NOP)
                 pass
         else:
             raise PccError(node, 'unsupported unary operator "%s"' % node.op)
@@ -825,23 +825,23 @@ class Pcc:
             raise PccError(node, 'unsupported binary operator "%s"' % node.op)
         binary_op = self.VM_BINARY_LOGICAL_OP[node.op] if is_helper_op else self.VM_BINARY_ARITHMETIC_OP[node.op]
         ## compile left-hand side (lhs) into ACC
-        self.compile_expression(node.left)          ## A := {lhs-expr}; F := undefined
+        self.compile_expression(node.left)              ## A := {lhs-expr}; F := undefined
         ## compile right-hand side (rhs) and combine with lhs using <binary_op>
         rhs_term = self.try_parse_term(node.right)
         if rhs_term is not None:
             if is_helper_op:
-                self.asm_out('LD', SCR0, rhs_term)
+                self.asm_out('LD', self.SCR0, rhs_term)
                 self.compile_helper_function_call(node.right, binary_op) ## A := A <binary_op> SCR0, F := undefined
             else:
-                self.asm_out(binary_op, rhs_term)   ## A := A <binary_op> x, F := A
+                self.asm_out(binary_op, rhs_term)       ## A := A <binary_op> x, F := A
         else:
-            self.asm_out('PUSHA')                   ## save ACC (lhs) onto stack
-            self.compile_expression(node.right, dst_reg=SCR0)   ## SCR0 := {rhs-expr}; F := undefined
-            self.asm_out('POPA')                    ## restore lhs in ACC from stack    
+            self.asm_out('PUSHA')                       ## save ACC (lhs) onto stack
+            self.compile_expression(node.right, dst_reg=self.SCR0) ## SCR0 := {rhs-expr}; F := undefined
+            self.asm_out('POPA')                        ## restore lhs in ACC from stack 
             if is_helper_op:
                 self.compile_helper_function_call(node.right, binary_op) ## A := A <binary_op> SCR0, F := undefined
             else:
-                self.asm_out(binary_op, SCR0)       ## A := A <binary_op> SCR0, F := A
+                self.asm_out(binary_op, self.SCR0)      ## A := A <binary_op> SCR0, F := A
         return False
 
     def _compile_Assignment_node(self, node, in_expr=False):
@@ -985,7 +985,7 @@ class Pcc:
                 if arg_term is None:
                     arg_term = self.try_parse_term(arg_expr_node)
                 if arg_term is None:
-                    arg_term = ARG_REGS[i_arg]
+                    arg_term = self.ARG_REGS[i_arg]
                     self.compile_assignment(arg_term, arg_expr_node)
                 args.append(arg_term)
             asm_instr = func_sym.asm_repr()
@@ -1144,7 +1144,7 @@ class Pcc:
             ret_tag = AsmTag()
             asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             asm_out('JZ', ret_tag)             ## IF (F == 0) GOTO ret_tag
-            asm_out('LDA', SCR0)
+            asm_out('LDA', self.SCR0)
             asm_out('OR', 0, comment='F=A')    ## assert F := A before conditional jump
             asm_out('JZ', ret_tag)             ## IF (F == 0) GOTO ret_tag
             asm_out('LDA', 1)
@@ -1152,7 +1152,7 @@ class Pcc:
             asm_out('RET')                     ## return TRUE or FALSE
         elif func_name == 'ORL':
             true_tag = AsmTag()
-            asm_out('OR', SCR0)                ## A := A | SCR0, F := A
+            asm_out('OR', self.SCR0)           ## A := A | SCR0, F := A
             asm_out('JNZ', true_tag)           ## IF (F != 0) GOTO true_tag
             asm_out('RET')                     ## return FALSE
             asm_out('TAG', true_tag)           ## true_tag:
@@ -1160,7 +1160,7 @@ class Pcc:
             asm_out('RET')                     ## return TRUE
         elif func_name == 'EQ':
             true_tag = AsmTag()
-            asm_out('CMP', SCR0)               ## F := A - SCR0
+            asm_out('CMP', self.SCR0)          ## F := A - SCR0
             asm_out('JZ', true_tag)            ## IF (F == 0) GOTO true_tag
             asm_out('LDA', 0)
             asm_out('RET')                     ## return FALSE
@@ -1169,7 +1169,7 @@ class Pcc:
             asm_out('RET')                     ## return TRUE
         elif func_name == 'NE':
             true_tag = AsmTag()
-            asm_out('CMP', SCR0)               ## F := A - SCR0
+            asm_out('CMP', self.SCR0)          ## F := A - SCR0
             asm_out('JNZ', true_tag)           ## IF (F != 0) GOTO true_tag
             asm_out('LDA', 0)                  ## A := 0
             asm_out('RET')                     ## return FALSE
@@ -1178,7 +1178,7 @@ class Pcc:
             asm_out('RET')                     ## return TRUE
         elif func_name == 'GT':
             false_tag = AsmTag()
-            asm_out('CMP', SCR0)               ## F := A - SCR0
+            asm_out('CMP', self.SCR0)          ## F := A - SCR0
             asm_out('JZ', false_tag)           ## IF (F == 0) GOTO false_tag
             asm_out('JM', false_tag)           ## IF (F < 0) GOTO false_tag
             asm_out('LDA', 1)
@@ -1188,7 +1188,7 @@ class Pcc:
             asm_out('RET')                     ## return FALSE
         elif func_name == 'GE':
             true_tag = AsmTag()
-            asm_out('CMP', SCR0)               ## F := A - SCR0
+            asm_out('CMP', self.SCR0)          ## F := A - SCR0
             asm_out('JP',  true_tag)           ## IF (F >= 0) GOTO true_tag
             asm_out('LDA', 0)
             asm_out('RET')                     ## return FALSE
@@ -1197,7 +1197,7 @@ class Pcc:
             asm_out('RET')                     ## return TRUE
         elif func_name == 'LT':
             true_tag = AsmTag()
-            asm_out('CMP', SCR0)               ## F := A - SCR0
+            asm_out('CMP', self.SCR0)          ## F := A - SCR0
             asm_out('JM',  true_tag)           ## IF (F < 0) GOTO true_tag
             asm_out('LDA', 0)
             asm_out('RET')                     ## return FALSE
@@ -1206,7 +1206,7 @@ class Pcc:
             asm_out('RET')                     ## return TRUE
         elif func_name == 'LE':
             true_tag = AsmTag()
-            asm_out('CMP', SCR0)               ## F := A - SCR0
+            asm_out('CMP', self.SCR0)          ## F := A - SCR0
             asm_out('JZ', true_tag)            ## IF (F == 0) GOTO true_tag
             asm_out('JM', true_tag)            ## IF (F < 0) GOTO true_tag
             asm_out('LDA', 0)
