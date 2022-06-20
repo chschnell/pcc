@@ -423,6 +423,143 @@ class VmApiFunctionSymbol(FunctionSymbol):
 
 ## ---------------------------------------------------------------------------
 
+class EmulatedInstrs:
+    EMULATED_INSTR = {
+        'NEG':  'int NEG(): A=-A; F=A',
+        'NOT':  'int NOT(): A=~A; F=A',
+        'NOTL': 'bool NOTL(): A=!A; A:(0|1)',
+        'ANDL': 'bool ANDL(int): A=(A && %s); A:(0|1)' % SCR0,
+        'ORL':  'bool ORL(int): A=(A || %s); A:(0|1)' % SCR0,
+        'EQ':   'bool EQ(int): A=(A == %s); A:(0|1)' % SCR0,
+        'NE':   'bool NE(int): A=(A != %s); A:(0|1)' % SCR0,
+        'GT':   'bool GT(int): A=(A > %s); A:(0|1)' % SCR0,
+        'GE':   'bool GE(int): A=(A >= %s); A:(0|1)' % SCR0,
+        'LT':   'bool LT(int): A=(A < %s); A:(0|1)' % SCR0,
+        'LE':   'bool LE(int): A=(A <= %s); A:(0|1)' % SCR0 }
+
+    INLINED_INSTR = ('NEG', 'NOT')
+
+    class InstrFunc:
+        def __init__(self, instr, asm_tag, asm_buf):
+            self.instr = instr          ## str, emulated instruction name
+            self.asm_tag = asm_tag      ## AsmTag, emulator function entry point's TAG
+            self.asm_buf = asm_buf      ## AsmBuffer, emulator function body's statement buffer
+
+    def __init__(self):
+        self.instr_funcs = {}           ## dict(str instr: InstrFunc instr_func), emulated instructions
+
+    def is_emulated(self, instr):
+        return instr in self.EMULATED_INSTR
+
+    def asm_bufs(self):
+        return [instr_func.asm_buf for instr_func in self.instr_funcs.values()]
+
+    def compile_instr(self, instr, asm_out): ## A := instr(A); F := undef
+        if instr in self.instr_funcs:
+            asm_out('CALL', self.instr_funcs[instr].asm_tag, comment=instr)
+        elif instr in self.INLINED_INSTR:
+            getattr(self, '_compile_%s_inline' % instr)(asm_out)
+        else:
+            instr_asm_tag = AsmTag()
+            instr_asm_out = AsmBuffer()
+            instr_asm_out('TAG', instr_asm_tag, comment=self.EMULATED_INSTR[instr])
+            getattr(self, '_compile_%s_definition' % instr)(instr_asm_out)
+            instr_asm_out('RET')
+            self.instr_funcs[instr] = self.InstrFunc(instr, instr_asm_tag, instr_asm_out)
+            asm_out('CALL', instr_asm_tag, comment=instr)
+
+    def _compile_NEG_inline(self, asm_out):
+        asm_out('XOR', '0xffffffff')    ## A := A ^ 0xffffffff
+        asm_out('ADD', 1)               ## A := A + 1; F := A
+
+    def _compile_NOT_inline(self, asm_out):
+        asm_out('XOR', '0xffffffff')    ## A := A ^ 0xffffffff; F := A
+
+    def _compile_NOTL_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
+        asm_out('JZ', true_tag)         ## IF (F == 0) GOTO true_tag
+        asm_out('LDA', 0)
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+    def _compile_ANDL_definition(self, asm_out):
+        ret_tag = AsmTag()
+        asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
+        asm_out('JZ', ret_tag)          ## IF (F == 0) GOTO ret_tag
+        asm_out('LDA', SCR0)
+        asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
+        asm_out('JZ', ret_tag)          ## IF (F == 0) GOTO ret_tag
+        asm_out('LDA', 1)
+        asm_out('TAG', ret_tag)         ## ret_tag: return TRUE or FALSE
+
+    def _compile_ORL_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('OR', SCR0)             ## A := A | SCR0, F := A
+        asm_out('JNZ', true_tag)        ## IF (F != 0) GOTO true_tag
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+    def _compile_EQ_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('CMP', SCR0)            ## F := A - SCR0
+        asm_out('JZ', true_tag)         ## IF (F == 0) GOTO true_tag
+        asm_out('LDA', 0)
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+    def _compile_NE_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('CMP', SCR0)            ## F := A - SCR0
+        asm_out('JNZ', true_tag)        ## IF (F != 0) GOTO true_tag
+        asm_out('LDA', 0)               ## A := 0
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+    def _compile_GT_definition(self, asm_out):
+        false_tag = AsmTag()
+        asm_out('CMP', SCR0)            ## F := A - SCR0
+        asm_out('JZ', false_tag)        ## IF (F == 0) GOTO false_tag
+        asm_out('JM', false_tag)        ## IF (F < 0) GOTO false_tag
+        asm_out('LDA', 1)
+        asm_out('RET')                  ## return TRUE
+        asm_out('TAG', false_tag)       ## false_tag: return FALSE
+        asm_out('LDA', 0)
+
+    def _compile_GE_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('CMP', SCR0)            ## F := A - SCR0
+        asm_out('JP',  true_tag)        ## IF (F >= 0) GOTO true_tag
+        asm_out('LDA', 0)
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+    def _compile_LT_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('CMP', SCR0)            ## F := A - SCR0
+        asm_out('JM',  true_tag)        ## IF (F < 0) GOTO true_tag
+        asm_out('LDA', 0)
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+    def _compile_LE_definition(self, asm_out):
+        true_tag = AsmTag()
+        asm_out('CMP', SCR0)            ## F := A - SCR0
+        asm_out('JZ', true_tag)         ## IF (F == 0) GOTO true_tag
+        asm_out('JM', true_tag)         ## IF (F < 0) GOTO true_tag
+        asm_out('LDA', 0)
+        asm_out('RET')                  ## return FALSE
+        asm_out('TAG', true_tag)        ## true_tag: return TRUE
+        asm_out('LDA', 1)
+
+## ---------------------------------------------------------------------------
+
 class Pcc:
     UNARY_OP_INSTR = {                      ## 3 arithmetic + 1 logical ops
         '+':  None,                         ## A=+A; F=undef/A (CIS/EIS)
@@ -450,19 +587,6 @@ class Pcc:
         '<':  'LT',                         ## A=(A <  x); F=undef/A (CIS/EIS); A:(0|1)
         '<=': 'LE' }                        ## A=(A <= x); F=undef/A (CIS/EIS); A:(0|1)
 
-    EMULATED_INSTR = {
-        'NEG':  'int NEG(): A=-A; F=A',
-        'NOT':  'int NOT(): A=~A; F=A',
-        'NOTL': 'int NOTL(): A=!A; A:(0|1)',
-        'ANDL': 'int ANDL(int): A=(A && %s); A:(0|1)' % SCR0,
-        'ORL':  'int ORL(int): A=(A || %s); A:(0|1)' % SCR0,
-        'EQ':   'int EQ(int): A=(A == %s); A:(0|1)' % SCR0,
-        'NE':   'int NE(int): A=(A != %s); A:(0|1)' % SCR0,
-        'GT':   'int GT(int): A=(A > %s); A:(0|1)' % SCR0,
-        'GE':   'int GE(int): A=(A >= %s); A:(0|1)' % SCR0,
-        'LT':   'int LT(int): A=(A < %s); A:(0|1)' % SCR0,
-        'LE':   'int LE(int): A=(A <= %s); A:(0|1)' % SCR0 }
-
     def __init__(self, c_sources, debug):
         self.c_sources = c_sources          ## CSourceBundle, C sources to compile
         self.debug = debug                  ## bool, True: show extra debug output
@@ -473,13 +597,13 @@ class Pcc:
         self.asm_out = self.asm_buf         ## AsmBuffer, current output buffer
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
         self.functions = {}                 ## dict(str func_name: Function function), user-defined and VM API functions
-        self.emulated_instrs = {}           ## dict(str instr: EmulatedInstr emulated_instr), emulated instructions
         self.context_function = None        ## None or UserDefFunction, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
         self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
         self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
+        self.em_instrs = EmulatedInstrs()   ## EmulatedInstrs, set of emulated instructions used
 
     def compile(self, root_node, do_reduce=True):
         main_function, userdef_functions = self.compile_1st_stage(root_node)
@@ -684,7 +808,7 @@ class Pcc:
         ## merge main() function body into init segment
         main_function.asm_buf.replace_instruction('RET', 'HALT')
         self.asm_buf.extend(main_function.asm_buf)
-        return [self.asm_buf] + userdef_asm_bufs[1:] + [i.asm_buf for i in self.emulated_instrs.values()]
+        return [self.asm_buf] + userdef_asm_bufs[1:] + self.em_instrs.asm_bufs()
 
     def compile_3rd_stage(self, all_asm_bufs):
         ## bind VM tags
@@ -735,11 +859,11 @@ class Pcc:
             op_instr = self.BINARY_OP_INSTR[assign_op[:-1]]
             if rhs_term is not None:
                 self.asm_out('LDA', dst_reg)                        ## A := dest_reg
-                self.asm_out(op_instr, rhs_term)                    ## A := A <op_instr> {rhs-term}; F := A
+                self.asm_out(op_instr, rhs_term)                    ## A := A <OP> {rhs-term}; F := A
             else:
                 self.compile_expression(rhs_node, dst_reg=SCR0)     ## SCR0 := {rhs-expr}; A := SCR0; F := undef/A (CIS/EIS)
                 self.asm_out('LDA', dst_reg)                        ## A := dest_reg
-                self.asm_out(op_instr, SCR0)                        ## A := A <op_instr> SCR0; F := A
+                self.asm_out(op_instr, SCR0)                        ## A := A <OP> SCR0; F := A
             self.asm_out('STA', dst_reg)                            ## dst_reg := A
         else:
             raise PccError(rhs_node, 'unsupported assignment operator "%s"' % assign_op)
@@ -766,31 +890,22 @@ class Pcc:
         if AsmCmd.tag_instr_idx(instr) >= 0:
             if len(instr_args) != 1:
                 raise PccError(node, '%s expects a single tag label argument' % instr)
-            context_function = self.context_function
             tag_label = instr_args[0]
-            static_tag = context_function.static_asm_tags.get(tag_label, None)
+            static_tag = self.context_function.static_asm_tags.get(tag_label, None)
             if static_tag is None:
                 static_tag = AsmTag()
-                context_function.static_asm_tags[tag_label] = static_tag
+                self.context_function.static_asm_tags[tag_label] = static_tag
             instr_args[0] = static_tag
         ## append raw assembler statement to current buffer
         self.asm_out(instr, *instr_args)
         return instr in ('RET', 'HALT')
 
-    def compile_emulated_instr_call(self, node, instr):
-        if instr in self.emulated_instrs:
-            emulated_instr = self.emulated_instrs[instr]
-        else:
-            emulated_instr = EmulatedInstr(instr, self.EMULATED_INSTR[instr])
-            self.emulated_instrs[instr] = emulated_instr
-        self.asm_out('CALL', emulated_instr.asm_tag, comment=instr)
-
     def compile_statement(self, node):
         ast_class_name = node.__class__.__name__
-        compile_class_node = getattr(self, '_compile_%s_node' % ast_class_name, None)
-        if not callable(compile_class_node):
+        _compile_class_node = getattr(self, '_compile_%s_node' % ast_class_name, None)
+        if not callable(_compile_class_node):
             raise PccError(node, '%s: unsupported statement syntax' % ast_class_name)
-        return compile_class_node(node)
+        return _compile_class_node(node)
 
     def _compile_UnaryOp_node(self, node):
         if node.op in ('++', '--', 'p++', 'p--'):
@@ -818,7 +933,7 @@ class Pcc:
             self.compile_expression(node.expr)      ## A := {expr}; F := undef/A (CIS/EIS)
             op_instr = self.UNARY_OP_INSTR[node.op]
             if op_instr is not None:
-                self.compile_emulated_instr_call(node, op_instr) ## A := <op_instr> A; F := undefined
+                self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := <OP> A; F := undef
         else:
             raise PccError(node, 'unsupported unary operator "%s"' % node.op)
         return False
@@ -829,22 +944,22 @@ class Pcc:
         op_instr = self.BINARY_OP_INSTR[node.op]
         ## compile left-hand side (lhs) into ACC
         self.compile_expression(node.left)          ## A := {lhs-expr}; F := undef/A (CIS/EIS)
-        ## compile right-hand side (rhs) and combine with lhs using <op_instr>
+        ## compile right-hand side (rhs) and combine with lhs using <OP>
         rhs_term = self.try_parse_term(node.right)
         if rhs_term is not None:
-            if op_instr in self.EMULATED_INSTR:
+            if self.em_instrs.is_emulated(op_instr):
                 self.asm_out('LD', SCR0, rhs_term)
-                self.compile_emulated_instr_call(node.right, op_instr) ## A := A <op_instr> SCR0, F := undefined
+                self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := A <OP> A; F := undef
             else:
-                self.asm_out(op_instr, rhs_term)    ## A := A <op_instr> x, F := A
+                self.asm_out(op_instr, rhs_term)    ## A := A <OP> x, F := A
         else:
             self.asm_out('PUSHA')                   ## save ACC (lhs) onto stack
             self.compile_expression(node.right, dst_reg=SCR0) ## SCR0 := {rhs-expr}; F := undef/A (CIS/EIS)
             self.asm_out('POPA')                    ## restore lhs in ACC from stack
-            if op_instr in self.EMULATED_INSTR:
-                self.compile_emulated_instr_call(node.right, op_instr) ## A := A <op_instr> SCR0, F := undefined
+            if self.em_instrs.is_emulated(op_instr):
+                self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := A <OP> A; F := undef
             else:
-                self.asm_out(op_instr, SCR0)        ## A := A <op_instr> SCR0, F := A
+                self.asm_out(op_instr, SCR0)        ## A := A <OP> SCR0, F := A
         return False
 
     def _compile_Assignment_node(self, node, in_expr=False):
@@ -1110,96 +1225,6 @@ class Pcc:
 
     def _compile_EmptyStatement_node(self, node):
         return False
-
-class EmulatedInstr:
-    def __init__(self, instr, def_comment):
-        self.instr = instr              ## str, emulated instruction name
-        self.asm_tag = AsmTag()         ## AsmTag, emulator function entry point's TAG
-        self.asm_buf = AsmBuffer()      ## AsmBuffer, emulator function body's statement buffer
-        asm_out = self.asm_buf
-        asm_out('TAG', self.asm_tag, comment=def_comment)
-        if instr == 'NEG':
-            asm_out('XOR', '0xffffffff')    ## A := A ^ 0xffffffff
-            asm_out('ADD', 1)               ## A := A + 1; F := A
-        elif instr == 'NOT':
-            asm_out('XOR', '0xffffffff')    ## A := A ^ 0xffffffff; F := A
-        elif instr == 'NOTL':
-            true_tag = AsmTag()
-            asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
-            asm_out('JZ', true_tag)         ## IF (F == 0) GOTO true_tag
-            asm_out('LDA', 0)
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)
-        elif instr == 'ANDL':
-            ret_tag = AsmTag()
-            asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
-            asm_out('JZ', ret_tag)          ## IF (F == 0) GOTO ret_tag
-            asm_out('LDA', SCR0)
-            asm_out('OR', 0, comment='F=A') ## assert F := A before conditional jump
-            asm_out('JZ', ret_tag)          ## IF (F == 0) GOTO ret_tag
-            asm_out('LDA', 1)
-            asm_out('TAG', ret_tag)         ## ret_tag: return TRUE or FALSE
-        elif instr == 'ORL':
-            true_tag = AsmTag()
-            asm_out('OR', SCR0)             ## A := A | SCR0, F := A
-            asm_out('JNZ', true_tag)        ## IF (F != 0) GOTO true_tag
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)
-        elif instr == 'EQ':
-            true_tag = AsmTag()
-            asm_out('CMP', SCR0)            ## F := A - SCR0
-            asm_out('JZ', true_tag)         ## IF (F == 0) GOTO true_tag
-            asm_out('LDA', 0)
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)
-        elif instr == 'NE':
-            true_tag = AsmTag()
-            asm_out('CMP', SCR0)            ## F := A - SCR0
-            asm_out('JNZ', true_tag)        ## IF (F != 0) GOTO true_tag
-            asm_out('LDA', 0)               ## A := 0
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)               ## A := 1
-        elif instr == 'GT':
-            false_tag = AsmTag()
-            asm_out('CMP', SCR0)            ## F := A - SCR0
-            asm_out('JZ', false_tag)        ## IF (F == 0) GOTO false_tag
-            asm_out('JM', false_tag)        ## IF (F < 0) GOTO false_tag
-            asm_out('LDA', 1)
-            asm_out('RET')                  ## return TRUE
-            asm_out('TAG', false_tag)       ## false_tag: return FALSE
-            asm_out('LDA', 0)
-        elif instr == 'GE':
-            true_tag = AsmTag()
-            asm_out('CMP', SCR0)            ## F := A - SCR0
-            asm_out('JP',  true_tag)        ## IF (F >= 0) GOTO true_tag
-            asm_out('LDA', 0)
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)
-        elif instr == 'LT':
-            true_tag = AsmTag()
-            asm_out('CMP', SCR0)            ## F := A - SCR0
-            asm_out('JM',  true_tag)        ## IF (F < 0) GOTO true_tag
-            asm_out('LDA', 0)
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)
-        elif instr == 'LE':
-            true_tag = AsmTag()
-            asm_out('CMP', SCR0)            ## F := A - SCR0
-            asm_out('JZ', true_tag)         ## IF (F == 0) GOTO true_tag
-            asm_out('JM', true_tag)         ## IF (F < 0) GOTO true_tag
-            asm_out('LDA', 0)
-            asm_out('RET')                  ## return FALSE
-            asm_out('TAG', true_tag)        ## true_tag: return TRUE
-            asm_out('LDA', 1)
-        else:
-            raise Exception('internal error: unexpected emulated instruction name "%s"' % instr)
-        asm_out('RET')
 
 ## ---------------------------------------------------------------------------
 
