@@ -67,12 +67,12 @@ int test_arithmetic_ops2(void)
     int a;
 
     a = +3;
-    if (a != 3) {
+    if (+a != 3) {
         return -1;
     }
 
-    a = -3;
-    if (a != -3) {
+    a = 3;
+    if (-a != -3) {
         return -2;
     }
 
