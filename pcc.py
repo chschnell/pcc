@@ -33,12 +33,13 @@ class AsmVar:
         filename, row = c_sources.map_coord(coord.line)
         fqname = var_sym.cname
         if var_sym.context_function is not None:
-            fqname = '%s.%s' % (var_sym.context_function.func_name, fqname)
-        return '; %3s: %s:%s:%s: %s %s' % (self, PurePath(filename).name,
-            row, coord.column, var_sym.ctype, fqname)
+            fqname = f'{var_sym.context_function.func_name}.{fqname}'
+        return f'; {self!s: >3}: ' \
+               f'{PurePath(filename).name}:{row}:{coord.column}: ' \
+               f'{var_sym.ctype} {fqname}'
 
     def bind(self, vm_var_nr):
-        self.vm_var_id = 'v%d' % vm_var_nr
+        self.vm_var_id = f'v{vm_var_nr}'
 
     _unbound_counter = 0
     def __str__(self):
@@ -46,14 +47,14 @@ class AsmVar:
             return self.vm_var_id
         elif self.unbound_id is None:
             AsmVar._unbound_counter += 1
-            self.unbound_id = '<UNBOUND_VARIABLE_%d>' % AsmVar._unbound_counter
+            self.unbound_id = f'<UNBOUND_VARIABLE_{AsmVar._unbound_counter}>'
         return self.unbound_id
 
 class AsmStatement:
     def __init__(self, comment=None):
         self.comment = comment              ## None or str, optional comment
 
-    def format_statement(self, indent):
+    def format_statement(self):
         raise NotImplementedError()
 
 class AsmTag(AsmStatement):
@@ -62,8 +63,8 @@ class AsmTag(AsmStatement):
         self.vm_tag_id = None               ## None (unbound) or str "1", "2", ..., any unique positive integer
         self.unbound_id = None              ## str, fallback-id for unbound TAG labels
 
-    def format_statement(self, indent):
-        return 'TAG %s' % self
+    def format_statement(self):
+        return f'TAG {self}'
 
     def bind(self, vm_tag_id):
         self.vm_tag_id = str(vm_tag_id)
@@ -74,7 +75,7 @@ class AsmTag(AsmStatement):
             return self.vm_tag_id
         elif self.unbound_id is None:
             AsmTag._unbound_counter += 1
-            self.unbound_id = '<UNBOUND_LABEL_%d>' % AsmTag._unbound_counter
+            self.unbound_id = f'<UNBOUND_LABEL_{AsmTag._unbound_counter}>'
         return self.unbound_id
 
 class AsmCmd(AsmStatement):
@@ -83,8 +84,8 @@ class AsmCmd(AsmStatement):
         self.instr = instr                  ## str, uppercase assembly language instruction
         self.args = args                    ## list(arg), command's arguments of type int, str, AsmVar or AsmTag
 
-    def format_statement(self, indent):
-        return '%s%-5s %s' % (indent, self.instr, ' '.join([str(arg) for arg in self.args]))
+    def format_statement(self):
+        return f'    {self.instr: <5} {" ".join([str(arg) for arg in self.args])}'
 
     @staticmethod
     def tag_instr_idx(instr):
@@ -106,7 +107,8 @@ class AsmBuffer:
         if tag_instr_idx < 0:               ## any instruction that doesn't expect a single TAG label argument
             asm_stmt = AsmCmd(instr, list(args), comment)
         elif len(args) != 1 or not isinstance(args[0], AsmTag):
-            raise Exception('internal error: instruction %s expects a single AsmTag argument, given: "%s"' % (instr, ' '.join(args)))
+            raise Exception(f'internal error: {instr} instruction expects a single AsmTag argument, ' \
+                f'found: "{" ".join([str(arg) for arg in args])}"')
         elif tag_instr_idx == 0:            ## TAG <label> instruction (use AsmTag <label> as statement object)
             asm_stmt = args[0]
             if comment is not None:
@@ -201,12 +203,12 @@ class AsmBuffer:
                         else:
                             local_asm_vars[asm_var] = True
         
-    def format_statements(self, indent, use_comments):
+    def format_statements(self, use_comments):
         asm_lines = []
         for asm_stmt in self.stmt_buf:
-            asm_line = asm_stmt.format_statement(indent)
+            asm_line = asm_stmt.format_statement()
             if use_comments and asm_stmt.comment is not None:
-                asm_line = '%-24s; %s' % (asm_line, asm_stmt.comment)
+                asm_line = f'{asm_line: <24}; {asm_stmt.comment}'
             asm_lines.append(asm_line)
         return asm_lines
 
@@ -228,7 +230,7 @@ class Function:
         self.has_return = self.ret_ctype != 'void'
 
     def decl_str(self):
-        return '%s %s(%s)' % (self.ret_ctype, self.func_name, ', '.join(self.arg_ctypes))
+        return f'{self.ret_ctype} {self.func_name}({", ".join(self.arg_ctypes)})'
 
     def matches(self, other):
         return type(self) is type(other) and \
@@ -249,7 +251,7 @@ class Function:
             elif len(type_names) == 2:
                 if accept_uint and type_names[0] == 'unsigned' and type_names[1] in ('int', 'long'):
                     return ' '.join(type_names)
-            raise PccError(node.type, 'unsupported type "%s"' % ' '.join(type_names))
+            raise PccError(node.type, f'unsupported type "{" ".join(type_names)}"')
         raise PccError(node.type, 'unsupported type')
 
 class VmApiFunction(Function):
@@ -312,9 +314,9 @@ class VmApiFunction(Function):
     def __init__(self, decl_node):
         super().__init__(decl_node, True)
         if self.func_name not in self.VM_FUNCTION_INSTR:
-            raise PccError(decl_node, 'undefined VM function name "%s"' % self.func_name)
+            raise PccError(decl_node, f'undefined VM function "{self.func_name}"')
         self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
-        self.map_argument = getattr(self, '_map_argument_%s' % self.func_name, self._map_argument_default)
+        self.map_argument = getattr(self, f'_map_argument_{self.func_name}', self._map_argument_default)
 
     def _map_argument_default(self, node, i_arg, const_arg):
         return const_arg
@@ -326,7 +328,7 @@ class VmApiFunction(Function):
             ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
             ##   PUD g p  | "O"        | "D"         | "U"
             if const_arg is None:
-                raise PccError(node, '%s: compile-time constant required for 2nd argument' % self.decl_str())
+                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
             const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 2:
                 const_arg = 'ODU'[const_int]
@@ -339,7 +341,7 @@ class VmApiFunction(Function):
             ##   vm_api.h  | PI_INPUT | PI_OUTPUT | PI_ALT5 | PI_ALT4 | PI_ALT0 | PI_ALT1 | PI_ALT2 | PI_ALT3
             ##   MODES g m | "R"      | "W"       | "5"     | "4"     | "0"     | "1"     | "2"     | "3"
             if const_arg is None:
-                raise PccError(node, '%s: compile-time constant required for 2nd argument' % self.decl_str())
+                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
             const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 7:
                 const_arg = 'RW540123'[const_int]
@@ -427,15 +429,15 @@ class EmulatedInstrs:
     EMULATED_INSTR = {
         'NEG':  'int NEG(): A=-A; F=A',
         'NOT':  'int NOT(): A=~A; F=A',
-        'NOTL': 'bool NOTL(): A=!A; A:(0|1)',
-        'ANDL': 'bool ANDL(int): A=(A && %s); A:(0|1)' % SCR0,
-        'ORL':  'bool ORL(int): A=(A || %s); A:(0|1)' % SCR0,
-        'EQ':   'bool EQ(int): A=(A == %s); A:(0|1)' % SCR0,
-        'NE':   'bool NE(int): A=(A != %s); A:(0|1)' % SCR0,
-        'GT':   'bool GT(int): A=(A > %s); A:(0|1)' % SCR0,
-        'GE':   'bool GE(int): A=(A >= %s); A:(0|1)' % SCR0,
-        'LT':   'bool LT(int): A=(A < %s); A:(0|1)' % SCR0,
-        'LE':   'bool LE(int): A=(A <= %s); A:(0|1)' % SCR0 }
+        'NOTL': 'int NOTL(): A=!A; A:(0|1)',
+        'ANDL': f'int ANDL({SCR0}): A=(A && {SCR0}); A:(0|1)',
+        'ORL':  f'int ORL({SCR0}): A=(A || {SCR0}); A:(0|1)',
+        'EQ':   f'int EQ({SCR0}): A=(A == {SCR0}); A:(0|1)',
+        'NE':   f'int NE({SCR0}): A=(A != {SCR0}); A:(0|1)',
+        'GT':   f'int GT({SCR0}): A=(A > {SCR0}); A:(0|1)',
+        'GE':   f'int GE({SCR0}): A=(A >= {SCR0}); A:(0|1)',
+        'LT':   f'int LT({SCR0}): A=(A < {SCR0}); A:(0|1)',
+        'LE':   f'int LE({SCR0}): A=(A <= {SCR0}); A:(0|1)' }
 
     INLINED_INSTR = ('NEG', 'NOT')
 
@@ -458,12 +460,12 @@ class EmulatedInstrs:
         if instr in self.instr_funcs:
             asm_out('CALL', self.instr_funcs[instr].asm_tag, comment=instr)
         elif instr in self.INLINED_INSTR:
-            getattr(self, '_compile_%s_inline' % instr)(asm_out)
+            getattr(self, f'_compile_{instr}_inline')(asm_out)
         else:
             instr_asm_tag = AsmTag()
             instr_asm_out = AsmBuffer()
             instr_asm_out('TAG', instr_asm_tag, comment=self.EMULATED_INSTR[instr])
-            getattr(self, '_compile_%s_definition' % instr)(instr_asm_out)
+            getattr(self, f'_compile_{instr}_definition')(instr_asm_out)
             instr_asm_out('RET')
             self.instr_funcs[instr] = self.InstrFunc(instr, instr_asm_tag, instr_asm_out)
             asm_out('CALL', instr_asm_tag, comment=instr)
@@ -596,6 +598,7 @@ class Pcc:
         self.asm_buf = AsmBuffer()          ## AsmBuffer, root output buffer
         self.asm_out = self.asm_buf         ## AsmBuffer, current output buffer
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
+        self.in_expression = False          ##
         self.functions = {}                 ## dict(str func_name: Function function), user-defined and VM API functions
         self.context_function = None        ## None or UserDefFunction, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
@@ -626,7 +629,7 @@ class Pcc:
         for i_buf, asm_buf in enumerate(self.all_asm_bufs):
             if len(asm_lines) > 0:
                 asm_lines.append('')
-            asm_lines.extend(asm_buf.format_statements('    ', use_comments))
+            asm_lines.extend(asm_buf.format_statements(use_comments))
         result = '\n'.join(asm_lines)
         if file is not None:
             print(result, file=file)
@@ -635,13 +638,13 @@ class Pcc:
     ## Private functions
 
     def log_error(self, e, context_function=None):
-        self._log_message(e.node, 'error: %s' % str(e), context_function)
+        self._log_message(e.node, f'error: {e}', context_function)
         if e.node is not None and self.debug:
             print('Extra debug node information:\n' + str(e.node), file=sys.stderr)
         self.error_count += 1
 
     def log_warning(self, node, message, context_function):
-        self._log_message(node, 'warning: %s' % message, context_function)
+        self._log_message(node, f'warning: {message}', context_function)
 
     def _log_message(self, node, message, context_function):
         if node is None:
@@ -673,7 +676,7 @@ class Pcc:
 
     def bind_symbol(self, node, sym_obj):
         if sym_obj.cname in self.scope.maps[0]:
-            raise PccError(node, 'redefinition of "%s"' % sym_obj.cname)
+            raise PccError(node, f'redefinition of "{sym_obj.cname}"')
         self.scope.maps[0][sym_obj.cname] = sym_obj
         return sym_obj
 
@@ -698,7 +701,7 @@ class Pcc:
     def declare_parameter(self, node, ctype, cname):
         m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
         if not m:
-            raise PccError(node, '%s: external variable names must contain one of "p0", "p1", ..., "p9"' % cname)
+            raise PccError(node, 'external variable names must contain one of "p0", "p1", ..., "p9"')
         vm_param_name = m.groups(0)[0]
         return self.bind_symbol(node, VmParameterSymbol(ctype, cname, vm_param_name))
 
@@ -747,7 +750,7 @@ class Pcc:
         if result is None and isinstance(node, c_ast.ID):
             var_sym = self.find_symbol(node.name, filter=VariableSymbol)
             if var_sym is None:
-                raise PccError(node, 'variable "%s" undeclared' % node.name)
+                raise PccError(node, f'undeclared variable "{node.name}"')
             result = var_sym.asm_repr()
         return result
 
@@ -790,7 +793,7 @@ class Pcc:
         for function in userdef_functions:
             if function.impl_node is None:
                 self.log_error(PccError(function.decl_node,
-                    'missing "%s()" function implementation' % function.func_name))
+                    f'missing "{function.func_name}()" function implementation'))
         if main_function is None or main_function.impl_node is None:
             self.log_error(PccError(None, 'missing "main()" function implementation'))
         return main_function, userdef_functions
@@ -833,40 +836,43 @@ class Pcc:
         self.all_asm_bufs = all_asm_bufs
         self.all_asm_vars = all_asm_vars
 
-    def compile_expression(self, node, dst_reg=None):               ## A := {node-expr}, F := undef/A (CIS/EIS)
+    def compile_expression(self, node, dst_reg=None):               ## A := (node-expr), F := undef/A (CIS/EIS)
         node_term = self.try_parse_term(node)
         if node_term is not None:
             self.asm_out('LDA', node_term)
-        elif isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.FuncCall)):
-            self.compile_statement(node)
-        elif isinstance(node, c_ast.Assignment):
-            self._compile_Assignment_node(node, in_expr=True)
+        elif isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.Assignment, c_ast.FuncCall)):
+            prev_in_expression = self.in_expression
+            self.in_expression = True
+            try:
+                self.compile_statement(node)
+            finally:
+                self.in_expression = prev_in_expression
         else:
             raise PccError(node, 'unsupported expression syntax')
         if dst_reg is not None:
             self.asm_out('STA', dst_reg)
 
-    def compile_assignment(self, dst_reg, rhs_node, assign_op='=', in_expr=False):
+    def compile_assignment(self, dst_reg, rhs_node, assign_op='='):
         rhs_term = self.try_parse_term(rhs_node)
         if assign_op == '=':                                        ## Simple assignment ("=")
             if rhs_term is not None:
-                self.asm_out('LD', dst_reg, rhs_term)               ## dst_reg := {rhs-term}
-                if in_expr:
+                self.asm_out('LD', dst_reg, rhs_term)               ## dst_reg := (rhs-term)
+                if self.in_expression:
                     self.asm_out('LDA', dst_reg)                    ## A := dst_reg; F := undef/A (CIS/EIS)
             else:
-                self.compile_expression(rhs_node, dst_reg=dst_reg)  ## dst_reg := {rhs-expr}; A := dst_reg; F := undef/A (CIS/EIS)
+                self.compile_expression(rhs_node, dst_reg=dst_reg)  ## dst_reg := (rhs-expr); A := dst_reg; F := undef/A (CIS/EIS)
         elif assign_op[:-1] in self.BINARY_OP_INSTR:                ## Assignment operator ("+=", "/=", ...)
             op_instr = self.BINARY_OP_INSTR[assign_op[:-1]]
             if rhs_term is not None:
                 self.asm_out('LDA', dst_reg)                        ## A := dest_reg
-                self.asm_out(op_instr, rhs_term)                    ## A := A <OP> {rhs-term}; F := A
+                self.asm_out(op_instr, rhs_term)                    ## A := A <OP> (rhs-term); F := A
             else:
-                self.compile_expression(rhs_node, dst_reg=SCR0)     ## SCR0 := {rhs-expr}; A := SCR0; F := undef/A (CIS/EIS)
+                self.compile_expression(rhs_node, dst_reg=SCR0)     ## SCR0 := (rhs-expr); A := SCR0; F := undef/A (CIS/EIS)
                 self.asm_out('LDA', dst_reg)                        ## A := dest_reg
                 self.asm_out(op_instr, SCR0)                        ## A := A <OP> SCR0; F := A
             self.asm_out('STA', dst_reg)                            ## dst_reg := A
         else:
-            raise PccError(rhs_node, 'unsupported assignment operator "%s"' % assign_op)
+            raise PccError(rhs_node, f'unsupported assignment operator "{assign_op}"')
 
     def compile_asm_statement(self, node):
         if node.args is None or not isinstance(node.args, c_ast.ExprList) or len(node.args.exprs) == 0:
@@ -889,7 +895,7 @@ class Pcc:
         ## replace user-defined static TAG labels with AsmTag objects
         if AsmCmd.tag_instr_idx(instr) >= 0:
             if len(instr_args) != 1:
-                raise PccError(node, '%s expects a single tag label argument' % instr)
+                raise PccError(node, f'{instr} expects a single tag label argument')
             tag_label = instr_args[0]
             static_tag = self.context_function.static_asm_tags.get(tag_label, None)
             if static_tag is None:
@@ -902,9 +908,9 @@ class Pcc:
 
     def compile_statement(self, node):
         ast_class_name = node.__class__.__name__
-        _compile_class_node = getattr(self, '_compile_%s_node' % ast_class_name, None)
+        _compile_class_node = getattr(self, f'_compile_{ast_class_name}_node', None)
         if not callable(_compile_class_node):
-            raise PccError(node, '%s: unsupported statement syntax' % ast_class_name)
+            raise PccError(node, f'unsupported statement syntax (AST element {ast_class_name})')
         return _compile_class_node(node)
 
     def _compile_UnaryOp_node(self, node):
@@ -913,7 +919,7 @@ class Pcc:
                 raise PccError(node, 'increment operator expects variable')
             reg_sym = self.find_symbol(node.expr.name, filter=VariableSymbol)
             if reg_sym is None:
-                raise PccError(node.expr, 'undefined variable "%s"' % node.expr.name)
+                raise PccError(node.expr, f'undefined variable "{node.expr.name}"')
             vm_reg = reg_sym.asm_repr()
             if node.op == '++':                     ## Prefix increment "++X":
                 self.asm_out('INR', vm_reg)         ## ++X, F := X
@@ -930,20 +936,20 @@ class Pcc:
                 self.asm_out('DCR', vm_reg)         ## --X, F := X
                 self.asm_out('LDA', SCR0)           ## A := SCR0; F := undef/A (CIS/EIS)
         elif node.op in self.UNARY_OP_INSTR:
-            self.compile_expression(node.expr)      ## A := {expr}; F := undef/A (CIS/EIS)
+            self.compile_expression(node.expr)      ## A := (expr); F := undef/A (CIS/EIS)
             op_instr = self.UNARY_OP_INSTR[node.op]
             if op_instr is not None:
                 self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := <OP> A; F := undef
         else:
-            raise PccError(node, 'unsupported unary operator "%s"' % node.op)
+            raise PccError(node, f'unsupported unary operator "{node.op}"')
         return False
 
     def _compile_BinaryOp_node(self, node):
         if node.op not in self.BINARY_OP_INSTR:
-            raise PccError(node, 'unsupported binary operator "%s"' % node.op)
+            raise PccError(node, f'unsupported binary operator "{node.op}"')
         op_instr = self.BINARY_OP_INSTR[node.op]
         ## compile left-hand side (lhs) into ACC
-        self.compile_expression(node.left)          ## A := {lhs-expr}; F := undef/A (CIS/EIS)
+        self.compile_expression(node.left)          ## A := (lhs-expr); F := undef/A (CIS/EIS)
         ## compile right-hand side (rhs) and combine with lhs using <OP>
         rhs_term = self.try_parse_term(node.right)
         if rhs_term is not None:
@@ -954,7 +960,7 @@ class Pcc:
                 self.asm_out(op_instr, rhs_term)    ## A := A <OP> x, F := A
         else:
             self.asm_out('PUSHA')                   ## save ACC (lhs) onto stack
-            self.compile_expression(node.right, dst_reg=SCR0) ## SCR0 := {rhs-expr}; F := undef/A (CIS/EIS)
+            self.compile_expression(node.right, dst_reg=SCR0) ## SCR0 := (rhs-expr); F := undef/A (CIS/EIS)
             self.asm_out('POPA')                    ## restore lhs in ACC from stack
             if self.em_instrs.is_emulated(op_instr):
                 self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := A <OP> A; F := undef
@@ -962,12 +968,12 @@ class Pcc:
                 self.asm_out(op_instr, SCR0)        ## A := A <OP> SCR0, F := A
         return False
 
-    def _compile_Assignment_node(self, node, in_expr=False):
+    def _compile_Assignment_node(self, node):
         lhs_sym = self.find_symbol(node.lvalue.name, filter=VariableSymbol)
         if lhs_sym is None:
-            raise PccError(node.lvalue, 'variable "%s" undeclared' % node.lvalue.name)
+            raise PccError(node.lvalue, f'undefined variable "{node.lvalue.name}"')
         lhs_reg = lhs_sym.asm_repr()
-        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op, in_expr=in_expr)
+        self.compile_assignment(lhs_reg, node.rvalue, assign_op=node.op)
         return False
 
     def _compile_Compound_node(self, node):
@@ -996,13 +1002,11 @@ class Pcc:
         ret_val_expected = self.context_function.has_return
         ret_val_given = node.expr is not None
         if not ret_val_expected and ret_val_given:
-            self.log_warning(node, 'function "%s" does not return a value' %
-                self.context_function.decl_str(), self.context_function)
+            self.log_warning(node, 'function does not return a value', self.context_function)
         elif ret_val_expected and not ret_val_given:
-            self.log_warning(node, 'function "%s" should return a value' %
-                self.context_function.decl_str(), self.context_function)
+            self.log_warning(node, 'function should return a value', self.context_function)
         elif ret_val_given:
-            self.compile_expression(node.expr)              ## A := {expr}; F := A
+            self.compile_expression(node.expr)              ## A := (expr); F := A
         self.asm_out('RET')
         return True
 
@@ -1012,17 +1016,17 @@ class Pcc:
         is_extern = False
         if len(node.storage) > 0:
             if len(node.storage) != 1 or node.storage[0] != 'extern':
-                raise PccError(node, 'unsupported storage qualifier "%s"' % ' '.join(node.storage))
+                raise PccError(node, f'unsupported storage qualifier "{" ".join(node.storage)}"')
             is_extern = True
         decl_type = node.type
         if isinstance(decl_type, c_ast.TypeDecl):
             if len(decl_type.quals) != 0:
-                raise PccError(node, 'unsupported type qualifier "%s"' % ' '.join(decl_type.quals))
+                raise PccError(node, f'unsupported type qualifier "{" ".join(decl_type.quals)}"')
             if isinstance(decl_type.type, c_ast.IdentifierType):
                 if len(decl_type.type.names) == 1 and decl_type.type.names[0] in ('int', 'long'):
                     var_ctype = decl_type.type.names[0]
                 else:
-                    raise PccError(node, 'unsupported variable type "%s"' % (' '.join(decl_type.type.names)))
+                    raise PccError(node, f'unsupported variable type "{" ".join(decl_type.type.names)}"')
             elif isinstance(decl_type.type, c_ast.Enum):
                 self.declare_enum(decl_type.type)
                 var_ctype = 'int'
@@ -1047,7 +1051,7 @@ class Pcc:
         func_sym = self.declare_function(node.decl)     ## UserDefFunctionSymbol func_sym
         function = func_sym.function
         if function.impl_node is not None:
-            raise PccError(node, 'redefinition of "%s"' % function.func_name)
+            raise PccError(node, f'redefinition of "{function.func_name}"')
         function.impl_node = node
         ## enter function context
         self.context_function = function
@@ -1063,13 +1067,12 @@ class Pcc:
                     arg_ctype = arg_ctypes[i_arg]
                     arg_cname = arg_param.name
                     if arg_cname is None:
-                        arg_cname = '.%s.%d' % (function.func_name, i_arg)
+                        arg_cname = f'.{function.func_name}.{i_arg}'
                     self.declare_variable(node.body, arg_ctype, arg_cname, asm_var=arg_vars[i_arg])
             returned = self._compile_Compound_node(node.body)
             if not returned:
                 if function.has_return:
-                    self.log_warning(node, 'function "%s" should return a value' %
-                        function.decl_str(), func_sym)
+                    self.log_warning(node, 'function should return a value', function)
                 self.asm_out('RET')
         except PccError as e:
             self.log_error(e, context_function=function)
@@ -1079,21 +1082,20 @@ class Pcc:
             self.context_function = None
         return False
 
-    def _compile_FuncCall_node(self, node, dst_reg=None):
+    def _compile_FuncCall_node(self, node):
         func_name = node.name.name
         if func_name == 'asm':
             return self.compile_asm_statement(node)
         returned = False
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
-            raise PccError(node, 'function "%s" undeclared' % func_name)
+            raise PccError(node, f'undeclared function "{func_name}"')
         function = func_sym.function
-        if dst_reg is not None and not function.has_return:
-            raise PccError(node, 'function "%s" declared without return value' % function.decl_str())
+        if self.in_expression and not function.has_return:
+            raise PccError(node, 'function declared without return value')
         arg_count = len(node.args.exprs) if node.args is not None else 0
         if function.arg_count != arg_count:
-            raise PccError(node, 'function "%s" expects %d argument(s) instead of %d' % (
-                function.decl_str(), function.arg_count, arg_count))
+            raise PccError(node, f'function expects {function.arg_count} argument(s) instead of {arg_count}')
         if isinstance(func_sym, VmApiFunctionSymbol):
             ## compile call to VM API function
             args = []
@@ -1109,7 +1111,7 @@ class Pcc:
             asm_instr = func_sym.asm_repr()
             if asm_instr == 'HALT':
                 returned = True
-            self.asm_out(asm_instr, *args, comment='%s();' % func_name)             ## A := vm_api_func(); F := A
+            self.asm_out(asm_instr, *args, comment=f'{func_name}();')               ## A := vm_api_func(); F := A
         else:
             ## compile call to user defined function
             if function is not self.context_function:
@@ -1118,15 +1120,13 @@ class Pcc:
                 arg_expr_node = node.args.exprs[i_arg]
                 arg_asm_var = function.arg_vars[i_arg]
                 self.compile_assignment(arg_asm_var, arg_expr_node)
-            self.asm_out('CALL', func_sym.asm_repr(), comment='%s();' % func_name)  ## A := user_func(); F := undef/A (CIS/EIS)
-        if dst_reg is not None:
-            self.asm_out('STA', dst_reg)
+            self.asm_out('CALL', func_sym.asm_repr(), comment=f'{func_name}();')    ## A := user_func(); F := undef/A (CIS/EIS)
         return returned
 
     def _compile_If_node(self, node):
         else_tag = AsmTag() if node.iffalse is not None else None
         endif_tag = AsmTag()
-        self.compile_expression(node.cond)                  ## A := {cond}; F := undef/A (CIS/EIS)
+        self.compile_expression(node.cond)                  ## A := (cond); F := undef/A (CIS/EIS)
         self.asm_out('OR', 0, comment='F=A')                ## assert F := A before conditional jump
         if else_tag is None:
             self.asm_out('JZ', endif_tag)                   ## NOT A AND no-else-branch: GOTO endif_tag
@@ -1148,7 +1148,7 @@ class Pcc:
         self.push_loop_tags(begin_tag, end_tag)
         try:
             self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
-            self.compile_expression(node.cond)              ## A := {cond}; F := undef/A (CIS/EIS)
+            self.compile_expression(node.cond)              ## A := (cond); F := undef/A (CIS/EIS)
             self.asm_out('OR', 0, comment='F=A')            ## assert F := A before conditional jump
             self.asm_out('JZ', end_tag)                     ## cond == FALSE: GOTO end_tag
             returned = self.compile_statement(node.stmt)    ## compile statement(s)
@@ -1165,7 +1165,7 @@ class Pcc:
         try:
             self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
             returned = self.compile_statement(node.stmt)    ## compile statement(s)
-            self.compile_expression(node.cond)              ## A := {cond}; F := undef/A (CIS/EIS)
+            self.compile_expression(node.cond)              ## A := (cond); F := undef/A (CIS/EIS)
             self.asm_out('OR', 0, comment='F=A')            ## assert F := A before conditional jump
             self.asm_out('JNZ', begin_tag)                  ## cond == TRUE: GOTO begin_tag
             self.asm_out('TAG', end_tag)                    ## TAG: end_tag
@@ -1191,7 +1191,7 @@ class Pcc:
                         self.compile_statement(node.init)
                 self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
                 if node.cond is not None:
-                    self.compile_expression(node.cond)          ## A := {cond}; F := undef/A (CIS/EIS)
+                    self.compile_expression(node.cond)          ## A := (cond); F := undef/A (CIS/EIS)
                     self.asm_out('OR', 0, comment='F=A')        ## assert F := A before conditional jump
                     self.asm_out('JZ', end_tag)                 ## cond == FALSE: GOTO end_tag
                 returned = self.compile_statement(node.stmt)    ## compile loop-body statement(s)
@@ -1199,9 +1199,9 @@ class Pcc:
                 if node.next is not None:                       ## compile iteration-expression(s)
                     if isinstance(node.next, c_ast.ExprList):
                         for expr_node in node.next.exprs:
-                            self.compile_expression(expr_node)  ## A := {next-expr}; F := undef/A (CIS/EIS)
+                            self.compile_expression(expr_node)  ## A := (next-expr); F := undef/A (CIS/EIS)
                     else:
-                        self.compile_expression(node.next)      ## A := {next-expr}; F := undef/A (CIS/EIS)
+                        self.compile_expression(node.next)      ## A := (next-expr); F := undef/A (CIS/EIS)
                 self.asm_out('JMP', begin_tag)                  ## GOTO begin_tag
                 self.asm_out('TAG', end_tag)                    ## TAG: end_tag
             finally:
@@ -1262,17 +1262,17 @@ class CSourceBundle:
     def format_src_message(self, flat_row, col, message, ctx_func_name=None):
         filename, row = self.map_coord(flat_row)
         if filename is None:
-            return ':%d:%d: %s' % (flat_row, col, message)
+            return f':{flat_row}:{col}: {message}'
         ## build error message
         err_message = ''
         if ctx_func_name is not None:
             e_location = (filename, ctx_func_name)
             if self.e_location != e_location:
                 self.e_location = e_location
-                err_message = '%s: In function "%s":\n' % e_location
+                err_message = f'{filename}: In function "{ctx_func_name}":\n'
         src_line = self.c_source_files[filename][row-1]
         pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
-        err_message += '%s:%d:%d: %s\n%s\n%s^^^' % (filename, row, col, message, src_line, pointer_indent)
+        err_message += f'{filename}:{row}:{col}: {message}\n{src_line}\n{pointer_indent}^^^'
         return err_message
 
 def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
@@ -1322,7 +1322,7 @@ def main():
     else:
         with open(out_filename, 'w') as f:
             cc.encode_asm(use_comments=args.comments, file=f)
-    print('\nVM variables used: %d/150, tags: %d/50.' % (cc.var_count, cc.tag_count), file=sys.stderr)
+    print(f'\nVM variables used: {cc.var_count}/150, tags: {cc.tag_count}/50.', file=sys.stderr)
     return 0
 
 if __name__ == "__main__":

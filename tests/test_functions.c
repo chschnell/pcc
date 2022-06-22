@@ -37,12 +37,18 @@ int test_unused_3()
     return 1;
 }
 
+int test_add(int a, int b)
+{
+    return a + b;
+}
+
 void main(void)
 {
     p0 = test_forward();
     p1 = test_normal(1);
     p2 = test_anon_arg(2, 3);
     p3 = test_local_decl(2);
+    p4 = test_add(2, 3) + test_add(5, 10);
 }
 
 int test_forward(void)
