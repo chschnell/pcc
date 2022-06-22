@@ -4,7 +4,7 @@ A tiny C compiler for [pigpio](https://abyz.me.uk/rpi/pigpio/)'s PIGS VM written
 
 ## Requirements
 
-Requires Python package **[pycparser](https://github.com/eliben/pycparser)**:
+Requires Python 3.6 (or newer) and Python package **[pycparser](https://github.com/eliben/pycparser)**:
 
     pip install pycparser
 
