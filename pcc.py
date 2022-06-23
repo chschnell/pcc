@@ -598,8 +598,8 @@ class Pcc:
         self.asm_buf = AsmBuffer()          ## AsmBuffer, root output buffer
         self.asm_out = self.asm_buf         ## AsmBuffer, current output buffer
         self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
-        self.in_expression = False          ##
         self.functions = {}                 ## dict(str func_name: Function function), user-defined and VM API functions
+        self.in_expression = False          ## bool, True: currently evaluating an expression
         self.context_function = None        ## None or UserDefFunction, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
@@ -836,7 +836,7 @@ class Pcc:
         self.all_asm_bufs = all_asm_bufs
         self.all_asm_vars = all_asm_vars
 
-    def compile_expression(self, node, dst_reg=None):               ## A := (node-expr), F := undef/A (CIS/EIS)
+    def compile_expression(self, node):                 ## A := (node-expr), F := undef/A (CIS/EIS)
         node_term = self.try_parse_term(node)
         if node_term is not None:
             self.asm_out('LDA', node_term)
@@ -849,28 +849,28 @@ class Pcc:
                 self.in_expression = prev_in_expression
         else:
             raise PccError(node, 'unsupported expression syntax')
-        if dst_reg is not None:
-            self.asm_out('STA', dst_reg)
 
     def compile_assignment(self, dst_reg, rhs_node, assign_op='='):
         rhs_term = self.try_parse_term(rhs_node)
-        if assign_op == '=':                                        ## Simple assignment ("=")
+        if assign_op == '=':                            ## Simple assignment ("=")
             if rhs_term is not None:
-                self.asm_out('LD', dst_reg, rhs_term)               ## dst_reg := (rhs-term)
+                self.asm_out('LD', dst_reg, rhs_term)   ## dst_reg := (rhs-term)
                 if self.in_expression:
-                    self.asm_out('LDA', dst_reg)                    ## A := dst_reg; F := undef/A (CIS/EIS)
+                    self.asm_out('LDA', dst_reg)        ## A := dst_reg; F := undef/A (CIS/EIS)
             else:
-                self.compile_expression(rhs_node, dst_reg=dst_reg)  ## dst_reg := (rhs-expr); A := dst_reg; F := undef/A (CIS/EIS)
-        elif assign_op[:-1] in self.BINARY_OP_INSTR:                ## Assignment operator ("+=", "/=", ...)
+                self.compile_expression(rhs_node)       ## A := (rhs-expr); F := undef/A (CIS/EIS)
+                self.asm_out('STA', dst_reg)            ## dst_reg := A
+        elif assign_op[:-1] in self.BINARY_OP_INSTR:    ## Assignment operator ("+=", "/=", ...)
             op_instr = self.BINARY_OP_INSTR[assign_op[:-1]]
             if rhs_term is not None:
-                self.asm_out('LDA', dst_reg)                        ## A := dest_reg
-                self.asm_out(op_instr, rhs_term)                    ## A := A <OP> (rhs-term); F := A
+                self.asm_out('LDA', dst_reg)            ## A := dest_reg
+                self.asm_out(op_instr, rhs_term)        ## A := A <OP> (rhs-term); F := A
             else:
-                self.compile_expression(rhs_node, dst_reg=SCR0)     ## SCR0 := (rhs-expr); A := SCR0; F := undef/A (CIS/EIS)
-                self.asm_out('LDA', dst_reg)                        ## A := dest_reg
-                self.asm_out(op_instr, SCR0)                        ## A := A <OP> SCR0; F := A
-            self.asm_out('STA', dst_reg)                            ## dst_reg := A
+                self.compile_expression(rhs_node)       ## A := (rhs-expr); F := undef/A (CIS/EIS)
+                self.asm_out('STA', SCR0)               ## SCR0 := A
+                self.asm_out('LDA', dst_reg)            ## A := dest_reg
+                self.asm_out(op_instr, SCR0)            ## A := A <OP> SCR0; F := A
+            self.asm_out('STA', dst_reg)                ## dst_reg := A
         else:
             raise PccError(rhs_node, f'unsupported assignment operator "{assign_op}"')
 
@@ -960,7 +960,8 @@ class Pcc:
                 self.asm_out(op_instr, rhs_term)    ## A := A <OP> x, F := A
         else:
             self.asm_out('PUSHA')                   ## save ACC (lhs) onto stack
-            self.compile_expression(node.right, dst_reg=SCR0) ## SCR0 := (rhs-expr); F := undef/A (CIS/EIS)
+            self.compile_expression(node.right)     ## A := (rhs-expr); F := undef/A (CIS/EIS)
+            self.asm_out('STA', SCR0)               ## SCR0 := A
             self.asm_out('POPA')                    ## restore lhs in ACC from stack
             if self.em_instrs.is_emulated(op_instr):
                 self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := A <OP> A; F := undef
