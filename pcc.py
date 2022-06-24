@@ -863,13 +863,13 @@ class Pcc:
         elif assign_op[:-1] in self.BINARY_OP_INSTR:    ## Assignment operator ("+=", "/=", ...)
             op_instr = self.BINARY_OP_INSTR[assign_op[:-1]]
             if rhs_term is not None:
-                self.asm_out('LDA', dst_reg)            ## A := dest_reg
-                self.asm_out(op_instr, rhs_term)        ## A := A <OP> (rhs-term); F := A
+                op_rhs = rhs_term
             else:
                 self.compile_expression(rhs_node)       ## A := (rhs-expr); F := undef/A (CIS/EIS)
                 self.asm_out('STA', SCR0)               ## SCR0 := A
-                self.asm_out('LDA', dst_reg)            ## A := dest_reg
-                self.asm_out(op_instr, SCR0)            ## A := A <OP> SCR0; F := A
+                op_rhs = SCR0
+            self.asm_out('LDA', dst_reg)                ## A := dest_reg
+            self.asm_out(op_instr, op_rhs)              ## A := A <OP> op_rhs; F := A
             self.asm_out('STA', dst_reg)                ## dst_reg := A
         else:
             raise PccError(rhs_node, f'unsupported assignment operator "{assign_op}"')
