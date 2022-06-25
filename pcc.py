@@ -27,17 +27,6 @@ class AsmVar:
         self.var_sym = var_sym              ## VmVariableSymbol var_sym, 1:1 relationship
         self.unbound_id = None              ## str, fallback-id for unbound variables
 
-    def format_decl_comment(self, c_sources):
-        var_sym = self.var_sym
-        coord = var_sym.decl_node.coord
-        filename, row = c_sources.map_coord(coord.line)
-        fqname = var_sym.cname
-        if var_sym.context_function is not None:
-            fqname = f'{var_sym.context_function.func_name}.{fqname}'
-        return f'; {self!s: >3}: ' \
-               f'{PurePath(filename).name}:{row}:{coord.column}: ' \
-               f'{var_sym.ctype} {fqname}'
-
     def bind(self, vm_var_nr):
         self.vm_var_id = f'v{vm_var_nr}'
 
@@ -427,9 +416,9 @@ class VmApiFunctionSymbol(FunctionSymbol):
 
 class EmulatedInstrs:
     EMULATED_INSTR = {
-        'NEG':  'int NEG(): A=-A; F=A',
-        'NOT':  'int NOT(): A=~A; F=A',
-        'NOTL': 'int NOTL(): A=!A; A:(0|1)',
+        'NEG':   'int NEG(): A=-A; F=A',
+        'NOT':   'int NOT(): A=~A; F=A',
+        'NOTL':  'int NOTL(): A=!A; A:(0|1)',
         'ANDL': f'int ANDL({SCR0}): A=(A && {SCR0}); A:(0|1)',
         'ORL':  f'int ORL({SCR0}): A=(A || {SCR0}); A:(0|1)',
         'EQ':   f'int EQ({SCR0}): A=(A == {SCR0}); A:(0|1)',
@@ -446,6 +435,7 @@ class EmulatedInstrs:
             self.instr = instr          ## str, emulated instruction name
             self.asm_tag = asm_tag      ## AsmTag, emulator function entry point's TAG
             self.asm_buf = asm_buf      ## AsmBuffer, emulator function body's statement buffer
+            self.caller = set()         ## set(str func_name), set of calling function names
 
     def __init__(self):
         self.instr_funcs = {}           ## dict(str instr: InstrFunc instr_func), emulated instructions
@@ -453,22 +443,33 @@ class EmulatedInstrs:
     def is_emulated(self, instr):
         return instr in self.EMULATED_INSTR
 
+    def drop_caller(self, func_names_dropped):
+        drop_instrs = []
+        for instr, instr_func in self.instr_funcs.items():
+            instr_func.caller -= func_names_dropped
+            if len(instr_func.caller) == 0:
+                drop_instrs.append(instr)
+        for instr in drop_instrs:
+            del self.instr_funcs[instr]
+
     def asm_bufs(self):
         return [instr_func.asm_buf for instr_func in self.instr_funcs.values()]
 
-    def compile_instr(self, instr, asm_out): ## A := instr(A); F := undef
-        if instr in self.instr_funcs:
-            asm_out('CALL', self.instr_funcs[instr].asm_tag, comment=instr)
-        elif instr in self.INLINED_INSTR:
-            getattr(self, f'_compile_{instr}_inline')(asm_out)
-        else:
-            instr_asm_tag = AsmTag()
-            instr_asm_out = AsmBuffer()
-            instr_asm_out('TAG', instr_asm_tag, comment=self.EMULATED_INSTR[instr])
-            getattr(self, f'_compile_{instr}_definition')(instr_asm_out)
-            instr_asm_out('RET')
-            self.instr_funcs[instr] = self.InstrFunc(instr, instr_asm_tag, instr_asm_out)
-            asm_out('CALL', instr_asm_tag, comment=instr)
+    def compile(self, cc, instr):       ## A := instr(A); F := undef
+        if instr not in self.instr_funcs:
+            if instr in self.INLINED_INSTR:
+                getattr(self, f'_compile_{instr}_inline')(cc.asm_out)
+                return
+            asm_tag = AsmTag()
+            asm_out = AsmBuffer()
+            asm_out('TAG', asm_tag, comment=self.EMULATED_INSTR[instr])
+            getattr(self, f'_compile_{instr}_definition')(asm_out)
+            asm_out('RET')
+            self.instr_funcs[instr] = self.InstrFunc(instr, asm_tag, asm_out)
+        instr_func = self.instr_funcs[instr]
+        func_name = cc.context_function.func_name if cc.context_function is not None else '.init'
+        instr_func.caller.add(func_name)
+        cc.asm_out('CALL', instr_func.asm_tag, comment=instr)
 
     def _compile_NEG_inline(self, asm_out):
         asm_out('XOR', '0xffffffff')    ## A := A ^ 0xffffffff
@@ -562,6 +563,53 @@ class EmulatedInstrs:
 
 ## ---------------------------------------------------------------------------
 
+class PccLogger:
+    def __init__(self, c_sources, debug, file=sys.stderr):
+        self.c_sources = c_sources      ## CSourceBundle, C sources to compile
+        self.debug = debug              ## bool, True: show extra debug output
+        self.file = file                ## file-like object, log sink
+        self.error_count = 0            ## int, error counter
+        self.e_location = None          ## tuple(), stores the most recent logged error location
+
+    def error(self, e, context_function=None):
+        self._log_node_message(e.node, f'error: {e}', context_function)
+        if e.node is not None and self.debug:
+            print('Extra debug node information:\n' + str(e.node), file=self.file)
+        self.error_count += 1
+
+    def error_msg(self, flat_row, col, message):
+        self._log_message(flat_row, col, message)
+        self.error_count += 1
+
+    def warning(self, node, message, context_function):
+        self._log_node_message(node, f'warning: {message}', context_function)
+
+    def _log_node_message(self, node, message, context_function):
+        if node is None:
+            print(message, file=self.file)
+        else:
+            flat_row, col = node.coord.line, node.coord.column
+            func_name = context_function.func_name if context_function is not None else None
+            self._log_message(flat_row, col, message, ctx_func_name=func_name)
+
+    def _log_message(self, flat_row, col, message, ctx_func_name=None):
+        filename, row = self.c_sources.map_coord(flat_row)
+        if filename is None:
+            error_msg = f':{flat_row}:{col}: {message}'
+        else:
+            error_msg = ''
+            if ctx_func_name is not None:
+                e_location = (filename, ctx_func_name)
+                if self.e_location != e_location:
+                    self.e_location = e_location
+                    error_msg = f'{filename}: In function "{ctx_func_name}":\n'
+            src_line = self.c_sources.line_at(filename, row)
+            pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
+            error_msg += f'{filename}:{row}:{col}: {message}\n{src_line}\n{pointer_indent}^^^'
+        print(error_msg, file=self.file)
+
+## ---------------------------------------------------------------------------
+
 class Pcc:
     UNARY_OP_INSTR = {                      ## 3 arithmetic + 1 logical ops
         '+':  None,                         ## A=+A; F=undef/A (CIS/EIS)
@@ -589,10 +637,9 @@ class Pcc:
         '<':  'LT',                         ## A=(A <  x); F=undef/A (CIS/EIS); A:(0|1)
         '<=': 'LE' }                        ## A=(A <= x); F=undef/A (CIS/EIS); A:(0|1)
 
-    def __init__(self, c_sources, debug):
+    def __init__(self, log, c_sources):
         self.c_sources = c_sources          ## CSourceBundle, C sources to compile
-        self.debug = debug                  ## bool, True: show extra debug output
-        self.error_count = 0                ## int, error counter
+        self.log = log                      ## PccLogger, log sink
         self.var_count = None               ## int, number of VM variables allocated
         self.tag_count = None               ## int, number of VM tags allocated
         self.asm_buf = AsmBuffer()          ## AsmBuffer, root output buffer
@@ -610,10 +657,9 @@ class Pcc:
 
     def compile(self, root_node, do_reduce=True):
         main_function, userdef_functions = self.compile_1st_stage(root_node)
-        if self.error_count == 0:
+        if self.log.error_count == 0:
             all_asm_bufs = self.compile_2nd_stage(main_function, userdef_functions, do_reduce)
             self.compile_3rd_stage(all_asm_bufs)
-        return self.error_count
 
     def encode_asm(self, use_comments=False, file=None):
         asm_lines = []
@@ -625,7 +671,15 @@ class Pcc:
             asm_lines.append(';  v2: reserved: ARG1')
             asm_lines.append(';  v3: reserved: ARG2')
             for asm_var in self.all_asm_vars:
-                asm_lines.append(asm_var.format_decl_comment(self.c_sources))
+                var_sym = asm_var.var_sym
+                coord = var_sym.decl_node.coord
+                filename, row = self.c_sources.map_coord(coord.line)
+                fqname = var_sym.cname
+                if var_sym.context_function is not None:
+                    fqname = f'{var_sym.context_function.func_name}.{fqname}'
+                asm_lines.append(f'; {asm_var!s: >3}: '
+                       f'{PurePath(filename).name}:{row}:{coord.column}: '
+                       f'{var_sym.ctype} {fqname}')
         for i_buf, asm_buf in enumerate(self.all_asm_bufs):
             if len(asm_lines) > 0:
                 asm_lines.append('')
@@ -636,23 +690,6 @@ class Pcc:
         return result
 
     ## Private functions
-
-    def log_error(self, e, context_function=None):
-        self._log_message(e.node, f'error: {e}', context_function)
-        if e.node is not None and self.debug:
-            print('Extra debug node information:\n' + str(e.node), file=sys.stderr)
-        self.error_count += 1
-
-    def log_warning(self, node, message, context_function):
-        self._log_message(node, f'warning: {message}', context_function)
-
-    def _log_message(self, node, message, context_function):
-        if node is None:
-            print(message, file=sys.stderr)
-        else:
-            flat_row, col = node.coord.line, node.coord.column
-            func_name = context_function.func_name if context_function is not None else None
-            print(self.c_sources.format_src_message(flat_row, col, message, ctx_func_name=func_name), file=sys.stderr)
 
     def push_scope(self):
         self.scope = self.scope.new_child()
@@ -765,7 +802,7 @@ class Pcc:
                 else:
                     raise PccError(node, 'unsupported syntax')
             except PccError as e:
-                self.log_error(e)
+                self.log.error(e)
         ## collect user-defined functions and main function
         userdef_functions = []
         main_function = None
@@ -788,14 +825,15 @@ class Pcc:
                 break
             for function in functions_passed:
                 function.caller -= func_names_dropped
+                self.em_instrs.drop_caller(func_names_dropped)
             userdef_functions = functions_passed
         ## check user-defined functions and main function
         for function in userdef_functions:
             if function.impl_node is None:
-                self.log_error(PccError(function.decl_node,
+                self.log.error(PccError(function.decl_node,
                     f'missing "{function.func_name}()" function implementation'))
         if main_function is None or main_function.impl_node is None:
-            self.log_error(PccError(None, 'missing "main()" function implementation'))
+            self.log.error(PccError(None, 'missing "main()" function implementation'))
         return main_function, userdef_functions
 
     def compile_2nd_stage(self, main_function, userdef_functions, do_reduce):
@@ -831,6 +869,7 @@ class Pcc:
         for asm_var in all_asm_vars:
             asm_var.bind(var_count)
             var_count += 1
+        ## store results
         self.tag_count = tag_count
         self.var_count = var_count
         self.all_asm_bufs = all_asm_bufs
@@ -939,7 +978,7 @@ class Pcc:
             self.compile_expression(node.expr)      ## A := (expr); F := undef/A (CIS/EIS)
             op_instr = self.UNARY_OP_INSTR[node.op]
             if op_instr is not None:
-                self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := <OP> A; F := undef
+                self.em_instrs.compile(self, op_instr) ## A := <OP> A; F := undef
         else:
             raise PccError(node, f'unsupported unary operator "{node.op}"')
         return False
@@ -955,7 +994,7 @@ class Pcc:
         if rhs_term is not None:
             if self.em_instrs.is_emulated(op_instr):
                 self.asm_out('LD', SCR0, rhs_term)
-                self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := A <OP> A; F := undef
+                self.em_instrs.compile(self, op_instr) ## A := A <OP> A; F := undef
             else:
                 self.asm_out(op_instr, rhs_term)    ## A := A <OP> x, F := A
         else:
@@ -964,7 +1003,7 @@ class Pcc:
             self.asm_out('STA', SCR0)               ## SCR0 := A
             self.asm_out('POPA')                    ## restore lhs in ACC from stack
             if self.em_instrs.is_emulated(op_instr):
-                self.em_instrs.compile_instr(op_instr, self.asm_out) ## A := A <OP> A; F := undef
+                self.em_instrs.compile(self, op_instr) ## A := A <OP> A; F := undef
             else:
                 self.asm_out(op_instr, SCR0)        ## A := A <OP> SCR0, F := A
         return False
@@ -985,7 +1024,7 @@ class Pcc:
                 in_unreachable_code = False
                 for statement_node in node.block_items:
                     if in_unreachable_code:
-                        self.log_warning(statement_node, 'unreachable code', self.context_function)
+                        self.log.warning(statement_node, 'unreachable code', self.context_function)
                         break
                     try:
                         s_returned = self.compile_statement(statement_node)
@@ -994,7 +1033,7 @@ class Pcc:
                         if s_returned or isinstance(statement_node, (c_ast.Continue, c_ast.Break)):
                             in_unreachable_code = True
                     except PccError as e:
-                        self.log_error(e, context_function=self.context_function)
+                        self.log.error(e, context_function=self.context_function)
             finally:
                 self.pop_scope()
         return returned
@@ -1003,9 +1042,9 @@ class Pcc:
         ret_val_expected = self.context_function.has_return
         ret_val_given = node.expr is not None
         if not ret_val_expected and ret_val_given:
-            self.log_warning(node, 'function does not return a value', self.context_function)
+            self.log.warning(node, 'function does not return a value', self.context_function)
         elif ret_val_expected and not ret_val_given:
-            self.log_warning(node, 'function should return a value', self.context_function)
+            self.log.warning(node, 'function should return a value', self.context_function)
         elif ret_val_given:
             self.compile_expression(node.expr)              ## A := (expr); F := A
         self.asm_out('RET')
@@ -1073,10 +1112,10 @@ class Pcc:
             returned = self._compile_Compound_node(node.body)
             if not returned:
                 if function.has_return:
-                    self.log_warning(node, 'function should return a value', function)
+                    self.log.warning(node, 'function should return a value', function)
                 self.asm_out('RET')
         except PccError as e:
-            self.log_error(e, context_function=function)
+            self.log.error(e, context_function=function)
         finally:
             self.pop_scope()
             self.asm_out = self.asm_buf
@@ -1233,7 +1272,6 @@ class CSourceBundle:
     def read_files(self, filenames):
         self.c_source_files = {}    ## dict(str filename: list(str line))
         self.c_segments = []        ## list(tuple(str seg_filename, int flat_idx_start, int flat_idx_end))
-        self.e_location = None      ## tuple(), stores the most recent logged error location
         ttl_line_count = 0          ## int, total number of lines
         c_result = ''               ## str, combined and cleaned source code
         try:
@@ -1260,21 +1298,8 @@ class CSourceBundle:
                 return seg_filename, row
         return None, flat_row
 
-    def format_src_message(self, flat_row, col, message, ctx_func_name=None):
-        filename, row = self.map_coord(flat_row)
-        if filename is None:
-            return f':{flat_row}:{col}: {message}'
-        ## build error message
-        err_message = ''
-        if ctx_func_name is not None:
-            e_location = (filename, ctx_func_name)
-            if self.e_location != e_location:
-                self.e_location = e_location
-                err_message = f'{filename}: In function "{ctx_func_name}":\n'
-        src_line = self.c_source_files[filename][row-1]
-        pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
-        err_message += f'{filename}:{row}:{col}: {message}\n{src_line}\n{pointer_indent}^^^'
-        return err_message
+    def line_at(self, filename, row):
+        return self.c_source_files[filename][row-1]
 
 def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
     if vm_api_h not in [PurePath(filename).name for filename in filenames]:
@@ -1284,6 +1309,7 @@ def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
     c_translation_unit = c_sources.read_files(filenames)
     if c_translation_unit is None:
         return None
+    log = PccLogger(c_sources, debug)
     ## build abstract syntax tree (AST) from C translation unit
     try:
         ast = CParser().parse(c_translation_unit)
@@ -1293,12 +1319,14 @@ def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
             print(e, file=sys.stderr)
         else:
             flat_row, col, message = int(m[1]), int(m[2]), m[3]
-            print(c_sources.format_src_message(flat_row, col, message), file=sys.stderr)
+            log.error_msg(flat_row, col, message)
         print('*** aborted with parser error', file=sys.stderr)
         return None
     ## translate AST into assembly language
-    cc = Pcc(c_sources, debug)
-    if cc.compile(ast, do_reduce=do_reduce) != 0:
+    cc = Pcc(log, c_sources)
+    cc.compile(ast, do_reduce=do_reduce)
+    if log.error_count != 0:
+
         print('*** aborted with compiler error(s)', file=sys.stderr)
         return None
     return cc
