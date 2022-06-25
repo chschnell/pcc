@@ -22,19 +22,19 @@ int test_anon_arg(int a, int)
 int test_unused_1(void)
 {
     int test_unused_2();
-    int test_unused_3();
-    return 1 + test_unused_2() + test_unused_3();
+    int test_unused_3(int a, int b);
+    return (test_unused_2() && test_unused_3(4, 3)) >= 0;
 }
 
 int test_unused_2(void)
 {
-    int test_unused_3(void);
-    return 1 + test_unused_3();
+    int test_unused_3(int a, int b);
+    return 1 + test_unused_3(3, 4);
 }
 
-int test_unused_3()
+int test_unused_3(int a, int b)
 {
-    return 1;
+    return a || b;
 }
 
 int test_add(int a, int b)
