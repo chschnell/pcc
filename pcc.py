@@ -203,217 +203,6 @@ class AsmBuffer:
 
 ## ---------------------------------------------------------------------------
 
-class Function:
-    def __init__(self, decl_node, is_vm_function):
-        arg_ctypes = []
-        func_args = decl_node.type.args
-        if func_args is not None and not (len(func_args.params) == 1 and
-                self._parse_ctype(func_args.params[0].type, accept_void=True, accept_uint=is_vm_function) == 'void'):
-            for arg in func_args.params:
-                arg_ctypes.append(self._parse_ctype(arg.type, accept_uint=is_vm_function))
-        self.decl_node = decl_node
-        self.func_name = decl_node.name
-        self.ret_ctype = self._parse_ctype(decl_node.type.type, accept_void=True, accept_uint=is_vm_function)
-        self.arg_ctypes = arg_ctypes
-        self.arg_count = len(arg_ctypes)
-        self.has_return = self.ret_ctype != 'void'
-
-    def decl_str(self):
-        return f'{self.ret_ctype} {self.func_name}({", ".join(self.arg_ctypes)})'
-
-    def matches(self, other):
-        return type(self) is type(other) and \
-               self.arg_ctypes == other.arg_ctypes and \
-               self.ret_ctype == other.ret_ctype
-
-    def _parse_ctype(self, node, accept_void=False, accept_uint=False):
-        if isinstance(node.type, c_ast.IdentifierType):
-            type_names = node.type.names
-            if len(type_names) == 1:
-                type_name = type_names[0]
-                if type_name in ('int', 'long'):
-                    return type_name
-                elif accept_void and type_name == 'void':
-                    return type_name
-                elif accept_uint and type_name == 'unsigned':
-                    return type_name
-            elif len(type_names) == 2:
-                if accept_uint and type_names[0] == 'unsigned' and type_names[1] in ('int', 'long'):
-                    return ' '.join(type_names)
-            raise PccError(node.type, f'unsupported type "{" ".join(type_names)}"')
-        raise PccError(node.type, 'unsupported type')
-
-class VmApiFunction(Function):
-    VM_FUNCTION_INSTR = {
-        'gpioSetMode':                  'MODES',    ## Basic commands
-        'gpioGetMode':                  'MODEG',
-        'gpioSetPullUpDown':            'PUD',
-        'gpioRead':                     'READ',
-        'gpioWrite':                    'WRITE',
-        'gpioPWM':                      'PWM',      ## PWM commands
-        'gpioSetPWMfrequency':          'PFS',
-        'gpioSetPWMrange':              'PRS',
-        'gpioGetPWMdutycycle':          'GDC',
-        'gpioGetPWMfrequency':          'PFG',
-        'gpioGetPWMrange':              'PRG',
-        'gpioGetPWMrealRange':          'PRRG',
-        'gpioServo':                    'SERVO',    ## Servo commands
-        'gpioGetServoPulsewidth':       'GPW',
-        'gpioTrigger':                  'TRIG',     ## Intermediate commands
-        'gpioSetWatchdog':              'WDOG',
-        'gpioRead_Bits_0_31':           'BR1',
-        'gpioRead_Bits_32_53':          'BR2',
-        'gpioWrite_Bits_0_31_Clear':    'BC1',
-        'gpioWrite_Bits_32_53_Clear':   'BC2',
-        'gpioWrite_Bits_0_31_Set':      'BS1',
-        'gpioWrite_Bits_32_53_Set':     'BS2',
-        'gpioNotifyOpen':               'NO',       ## Advanced commands
-        'gpioNotifyClose':              'NC',
-        'gpioNotifyBegin':              'NB',
-        'gpioNotifyPause':              'NP',
-        'gpioHardwareClock':            'HC',
-        'gpioHardwarePWM':              'HP',
-        'gpioGlitchFilter':             'FG',
-        'gpioNoiseFilter':              'FN',
-        'gpioSetPad':                   'PADS',
-        'gpioGetPad':                   'PADG',
-        'eventMonitor':                 'EVM',      ## Event commands
-        'eventTrigger':                 'EVT',
-        'i2cOpen':                      'I2CO',     ## I2C commands
-        'i2cClose':                     'I2CC',
-        'i2cWriteQuick':                'I2CWQ',
-        'i2cReadByte':                  'I2CRS',
-        'i2cWriteByte':                 'I2CWS',
-        'i2cReadByteData':              'I2CRB',
-        'i2cWriteByteData':             'I2CWB',
-        'i2cReadWordData':              'I2CRW',
-        'i2cWriteWordData':             'I2CWW',
-        'i2cProcessCall':               'I2CPC',
-        'gpioHardwareRevision':         'HWVER',    ## Utility commands
-        'gpioDelay_us':                 'MICS',
-        'gpioDelay_ms':                 'MILS',
-        'gpioVersion':                  'PIGPV',
-        'gpioTick':                     'TICK',
-        'gpioCfgGetInternals':          'CGI',      ## Configuration commands
-        'gpioCfgSetInternals':          'CSI',
-        'gpioWait':                     'WAIT',     ## Script-exclusive commands
-        'eventWait':                    'EVTWT',
-        'exit':                         'HALT' }
-
-    def __init__(self, decl_node):
-        super().__init__(decl_node, True)
-        if self.func_name not in self.VM_FUNCTION_INSTR:
-            raise PccError(decl_node, f'undefined VM function "{self.func_name}"')
-        self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
-        self.map_argument = getattr(self, f'_map_argument_{self.func_name}', self._map_argument_default)
-
-    def _map_argument_default(self, node, i_arg, const_arg):
-        return const_arg
-
-    def _map_argument_gpioSetPullUpDown(self, node, i_arg, const_arg):
-        if i_arg == 1:
-            ## int gpioSetPullUpDown(unsigned gpio, unsigned pud), 2nd argument "pud":
-            ##   index    | 0          | 1           | 2
-            ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
-            ##   PUD g p  | "O"        | "D"         | "U"
-            if const_arg is None:
-                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
-            const_int = int(const_arg, 0)
-            if const_int >= 0 and const_int <= 2:
-                const_arg = 'ODU'[const_int]
-        return const_arg
-
-    def _map_argument_gpioSetMode(self, node, i_arg, const_arg):
-        if i_arg == 1:
-            ## int gpioSetMode(unsigned gpio, unsigned mode), 2nd argument "mode":
-            ##   index     | 0        | 1         | 2       | 3       | 4       | 5       | 6       | 7
-            ##   vm_api.h  | PI_INPUT | PI_OUTPUT | PI_ALT5 | PI_ALT4 | PI_ALT0 | PI_ALT1 | PI_ALT2 | PI_ALT3
-            ##   MODES g m | "R"      | "W"       | "5"     | "4"     | "0"     | "1"     | "2"     | "3"
-            if const_arg is None:
-                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
-            const_int = int(const_arg, 0)
-            if const_int >= 0 and const_int <= 7:
-                const_arg = 'RW540123'[const_int]
-        return const_arg
-
-class UserDefFunction(Function):
-    def __init__(self, decl_node):
-        super().__init__(decl_node, False)
-        if self.func_name == 'main':
-            ## check main() function prototype constraints
-            if self.has_return:
-                raise PccError(decl_node, 'return type other than "void" is not supported for main()')
-            elif self.arg_count > 0:
-                raise PccError(decl_node, 'function arguments are not supported for main()')
-        self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
-        self.caller = set()             ## set(str func_name), set of calling function names
-        self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
-        self.asm_buf = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
-        self.arg_vars = [               ## list(AsmVar), function argument VM variables
-            AsmVar() for i in range(self.arg_count)]
-        self.static_asm_tags = {}       ## dict(str tag_label: AsmTag asm_tag), user-defined static tags
-
-## ---------------------------------------------------------------------------
-
-class AbstractSymbol:
-    def __init__(self, cname):
-        self.cname = cname              ## str cname, symbol's C name in scope
-
-    def asm_repr(self):                 ## returns str, AsmVar or AsmTag, only types
-        raise NotImplementedError()     ## that properly expand themselves with str()
-
-class EnumSymbol(AbstractSymbol):
-    def __init__(self, cname, const_value):
-        super().__init__(cname)
-        self.const_value = const_value
-
-    def asm_repr(self):                 ## str const_value, integer represented as str
-        return self.const_value
-
-class VariableSymbol(AbstractSymbol):
-    def __init__(self, ctype, cname):
-        super().__init__(cname)
-        self.ctype = ctype
-
-class VmVariableSymbol(VariableSymbol):
-    def __init__(self, ctype, cname, asm_var, decl_node, context_function):
-        super().__init__(ctype, cname)
-        if asm_var is None:
-            self.asm_var = AsmVar(var_sym=self)
-        else:
-            if asm_var.var_sym is not None:
-                raise Exception('internal error: AsmVar is already bound to a VariableSymbol')
-            asm_var.var_sym = self
-            self.asm_var = asm_var
-        self.decl_node = decl_node
-        self.context_function = context_function
-
-    def asm_repr(self):                 ## AsmVar asm_var, str() expands to VM variable name ("vN")
-        return self.asm_var
-
-class VmParameterSymbol(VariableSymbol):
-    def __init__(self, ctype, cname, asm_par):
-        super().__init__(ctype, cname)
-        self.asm_par = asm_par
-
-    def asm_repr(self):                 ## str asm_par, VM parameter name ("pN")
-        return self.asm_par
-
-class FunctionSymbol(AbstractSymbol):
-    def __init__(self, cname, function):
-        super().__init__(cname)
-        self.function = function
-
-class UserDefFunctionSymbol(FunctionSymbol):
-    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to function entry point's TAG
-        return self.function.asm_tag
-
-class VmApiFunctionSymbol(FunctionSymbol):
-    def asm_repr(self):                 ## str vm_func_instr, VM function's assembly language instruction
-        return self.function.vm_func_instr
-
-## ---------------------------------------------------------------------------
-
 class EmulatedInstrs:
     EMULATED_INSTR = {
         'NEG':   'int NEG(): A=-A; F=A',
@@ -563,6 +352,217 @@ class EmulatedInstrs:
 
 ## ---------------------------------------------------------------------------
 
+class Function:
+    def __init__(self, decl_node, is_vm_function):
+        arg_ctypes = []
+        func_args = decl_node.type.args
+        if func_args is not None and not (len(func_args.params) == 1 and
+                self._parse_ctype(func_args.params[0].type, accept_void=True, accept_uint=is_vm_function) == 'void'):
+            for arg in func_args.params:
+                arg_ctypes.append(self._parse_ctype(arg.type, accept_uint=is_vm_function))
+        self.decl_node = decl_node
+        self.func_name = decl_node.name
+        self.ret_ctype = self._parse_ctype(decl_node.type.type, accept_void=True, accept_uint=is_vm_function)
+        self.arg_ctypes = arg_ctypes
+        self.arg_count = len(arg_ctypes)
+        self.has_return = self.ret_ctype != 'void'
+
+    def decl_str(self):
+        return f'{self.ret_ctype} {self.func_name}({", ".join(self.arg_ctypes)})'
+
+    def matches(self, other):
+        return type(self) is type(other) and \
+               self.arg_ctypes == other.arg_ctypes and \
+               self.ret_ctype == other.ret_ctype
+
+    def _parse_ctype(self, node, accept_void=False, accept_uint=False):
+        if isinstance(node.type, c_ast.IdentifierType):
+            type_names = node.type.names
+            if len(type_names) == 1:
+                type_name = type_names[0]
+                if type_name in ('int', 'long'):
+                    return type_name
+                elif accept_void and type_name == 'void':
+                    return type_name
+                elif accept_uint and type_name == 'unsigned':
+                    return type_name
+            elif len(type_names) == 2:
+                if accept_uint and type_names[0] == 'unsigned' and type_names[1] in ('int', 'long'):
+                    return ' '.join(type_names)
+            raise PccError(node.type, f'unsupported type "{" ".join(type_names)}"')
+        raise PccError(node.type, 'unsupported type')
+
+class UserDefFunction(Function):
+    def __init__(self, decl_node):
+        super().__init__(decl_node, False)
+        if self.func_name == 'main':
+            ## check main() function prototype constraints
+            if self.has_return:
+                raise PccError(decl_node, 'return type other than "void" is not supported for main()')
+            elif self.arg_count > 0:
+                raise PccError(decl_node, 'function arguments are not supported for main()')
+        self.impl_node = None           ## None or c_ast.FuncDef, function implementation's AST node
+        self.caller = set()             ## set(str func_name), set of calling function names
+        self.asm_tag = AsmTag()         ## AsmTag, str() expands to function entry point's TAG
+        self.asm_buf = AsmBuffer()      ## AsmBuffer, function implementation's statement buffer
+        self.arg_vars = [               ## list(AsmVar), function argument VM variables
+            AsmVar() for i in range(self.arg_count)]
+        self.static_asm_tags = {}       ## dict(str tag_label: AsmTag asm_tag), user-defined static tags
+
+class VmApiFunction(Function):
+    VM_FUNCTION_INSTR = {
+        'gpioSetMode':                  'MODES',    ## Basic commands
+        'gpioGetMode':                  'MODEG',
+        'gpioSetPullUpDown':            'PUD',
+        'gpioRead':                     'READ',
+        'gpioWrite':                    'WRITE',
+        'gpioPWM':                      'PWM',      ## PWM commands
+        'gpioSetPWMfrequency':          'PFS',
+        'gpioSetPWMrange':              'PRS',
+        'gpioGetPWMdutycycle':          'GDC',
+        'gpioGetPWMfrequency':          'PFG',
+        'gpioGetPWMrange':              'PRG',
+        'gpioGetPWMrealRange':          'PRRG',
+        'gpioServo':                    'SERVO',    ## Servo commands
+        'gpioGetServoPulsewidth':       'GPW',
+        'gpioTrigger':                  'TRIG',     ## Intermediate commands
+        'gpioSetWatchdog':              'WDOG',
+        'gpioRead_Bits_0_31':           'BR1',
+        'gpioRead_Bits_32_53':          'BR2',
+        'gpioWrite_Bits_0_31_Clear':    'BC1',
+        'gpioWrite_Bits_32_53_Clear':   'BC2',
+        'gpioWrite_Bits_0_31_Set':      'BS1',
+        'gpioWrite_Bits_32_53_Set':     'BS2',
+        'gpioNotifyOpen':               'NO',       ## Advanced commands
+        'gpioNotifyClose':              'NC',
+        'gpioNotifyBegin':              'NB',
+        'gpioNotifyPause':              'NP',
+        'gpioHardwareClock':            'HC',
+        'gpioHardwarePWM':              'HP',
+        'gpioGlitchFilter':             'FG',
+        'gpioNoiseFilter':              'FN',
+        'gpioSetPad':                   'PADS',
+        'gpioGetPad':                   'PADG',
+        'eventMonitor':                 'EVM',      ## Event commands
+        'eventTrigger':                 'EVT',
+        'i2cOpen':                      'I2CO',     ## I2C commands
+        'i2cClose':                     'I2CC',
+        'i2cWriteQuick':                'I2CWQ',
+        'i2cReadByte':                  'I2CRS',
+        'i2cWriteByte':                 'I2CWS',
+        'i2cReadByteData':              'I2CRB',
+        'i2cWriteByteData':             'I2CWB',
+        'i2cReadWordData':              'I2CRW',
+        'i2cWriteWordData':             'I2CWW',
+        'i2cProcessCall':               'I2CPC',
+        'gpioHardwareRevision':         'HWVER',    ## Utility commands
+        'gpioDelay_us':                 'MICS',
+        'gpioDelay_ms':                 'MILS',
+        'gpioVersion':                  'PIGPV',
+        'gpioTick':                     'TICK',
+        'gpioCfgGetInternals':          'CGI',      ## Configuration commands
+        'gpioCfgSetInternals':          'CSI',
+        'gpioWait':                     'WAIT',     ## Script-exclusive commands
+        'eventWait':                    'EVTWT',
+        'exit':                         'HALT' }
+
+    def __init__(self, decl_node):
+        super().__init__(decl_node, True)
+        if self.func_name not in self.VM_FUNCTION_INSTR:
+            raise PccError(decl_node, f'undefined VM function "{self.func_name}"')
+        self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
+        self.map_argument = getattr(self, f'_map_argument_{self.func_name}', self._map_argument_default)
+
+    def _map_argument_default(self, node, i_arg, const_arg):
+        return const_arg
+
+    def _map_argument_gpioSetPullUpDown(self, node, i_arg, const_arg):
+        if i_arg == 1:
+            ## int gpioSetPullUpDown(unsigned gpio, unsigned pud), 2nd argument "pud":
+            ##   index    | 0          | 1           | 2
+            ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
+            ##   PUD g p  | "O"        | "D"         | "U"
+            if const_arg is None:
+                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
+            const_int = int(const_arg, 0)
+            if const_int >= 0 and const_int <= 2:
+                const_arg = 'ODU'[const_int]
+        return const_arg
+
+    def _map_argument_gpioSetMode(self, node, i_arg, const_arg):
+        if i_arg == 1:
+            ## int gpioSetMode(unsigned gpio, unsigned mode), 2nd argument "mode":
+            ##   index     | 0        | 1         | 2       | 3       | 4       | 5       | 6       | 7
+            ##   vm_api.h  | PI_INPUT | PI_OUTPUT | PI_ALT5 | PI_ALT4 | PI_ALT0 | PI_ALT1 | PI_ALT2 | PI_ALT3
+            ##   MODES g m | "R"      | "W"       | "5"     | "4"     | "0"     | "1"     | "2"     | "3"
+            if const_arg is None:
+                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
+            const_int = int(const_arg, 0)
+            if const_int >= 0 and const_int <= 7:
+                const_arg = 'RW540123'[const_int]
+        return const_arg
+
+## ---------------------------------------------------------------------------
+
+class AbstractSymbol:
+    def __init__(self, cname):
+        self.cname = cname              ## str cname, symbol's C name in scope
+
+    def asm_repr(self):                 ## returns str, AsmVar or AsmTag, only types
+        raise NotImplementedError()     ## that properly expand themselves with str()
+
+class EnumSymbol(AbstractSymbol):
+    def __init__(self, cname, const_value):
+        super().__init__(cname)
+        self.const_value = const_value
+
+    def asm_repr(self):                 ## str const_value, integer represented as str
+        return self.const_value
+
+class VariableSymbol(AbstractSymbol):
+    def __init__(self, ctype, cname):
+        super().__init__(cname)
+        self.ctype = ctype
+
+class VmVariableSymbol(VariableSymbol):
+    def __init__(self, ctype, cname, asm_var, decl_node, context_function):
+        super().__init__(ctype, cname)
+        if asm_var is None:
+            self.asm_var = AsmVar(var_sym=self)
+        else:
+            if asm_var.var_sym is not None:
+                raise Exception('internal error: AsmVar is already bound to a VariableSymbol')
+            asm_var.var_sym = self
+            self.asm_var = asm_var
+        self.decl_node = decl_node
+        self.context_function = context_function
+
+    def asm_repr(self):                 ## AsmVar asm_var, str() expands to VM variable name ("vN")
+        return self.asm_var
+
+class VmParameterSymbol(VariableSymbol):
+    def __init__(self, ctype, cname, asm_par):
+        super().__init__(ctype, cname)
+        self.asm_par = asm_par
+
+    def asm_repr(self):                 ## str asm_par, VM parameter name ("pN")
+        return self.asm_par
+
+class FunctionSymbol(AbstractSymbol):
+    def __init__(self, cname, function):
+        super().__init__(cname)
+        self.function = function
+
+class UserDefFunctionSymbol(FunctionSymbol):
+    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to function entry point's TAG
+        return self.function.asm_tag
+
+class VmApiFunctionSymbol(FunctionSymbol):
+    def asm_repr(self):                 ## str vm_func_instr, VM function's assembly language instruction
+        return self.function.vm_func_instr
+
+## ---------------------------------------------------------------------------
+
 class PccLogger:
     def __init__(self, c_sources, debug, file=sys.stderr):
         self.c_sources = c_sources      ## CSourceBundle, C sources to compile
@@ -571,14 +571,14 @@ class PccLogger:
         self.error_count = 0            ## int, error counter
         self.e_location = None          ## tuple(), stores the most recent logged error location
 
+    def error_msg(self, flat_row, col, message):
+        self._log_message(flat_row, col, message)
+        self.error_count += 1
+
     def error(self, e, context_function=None):
         self._log_node_message(e.node, f'error: {e}', context_function)
         if e.node is not None and self.debug:
             print('Extra debug node information:\n' + str(e.node), file=self.file)
-        self.error_count += 1
-
-    def error_msg(self, flat_row, col, message):
-        self._log_message(flat_row, col, message)
         self.error_count += 1
 
     def warning(self, node, message, context_function):
@@ -610,7 +610,7 @@ class PccLogger:
 
 ## ---------------------------------------------------------------------------
 
-class Pcc:
+class AstCompiler:
     UNARY_OP_INSTR = {                      ## 3 arithmetic + 1 logical ops
         '+':  None,                         ## A=+A; F=undef/A (CIS/EIS)
         '-':  'NEG',                        ## A=-A; F=undef/A (CIS/EIS)
@@ -638,56 +638,29 @@ class Pcc:
         '<=': 'LE' }                        ## A=(A <= x); F=undef/A (CIS/EIS); A:(0|1)
 
     def __init__(self, log, c_sources):
-        self.c_sources = c_sources          ## CSourceBundle, C sources to compile
         self.log = log                      ## PccLogger, log sink
-        self.var_count = None               ## int, number of VM variables allocated
-        self.tag_count = None               ## int, number of VM tags allocated
-        self.asm_buf = AsmBuffer()          ## AsmBuffer, root output buffer
-        self.asm_out = self.asm_buf         ## AsmBuffer, current output buffer
-        self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
+        self.c_sources = c_sources          ## CSourceBundle, C sources to compile
         self.functions = {}                 ## dict(str func_name: Function function), user-defined and VM API functions
-        self.in_expression = False          ## bool, True: currently evaluating an expression
+        self.init_asm_buf = AsmBuffer()     ## AsmBuffer, topmost output buffer
+        self.asm_out = self.init_asm_buf    ## AsmBuffer, current output buffer
+        self.scope = collections.ChainMap() ## ChainMap, current scope with chained parents
         self.context_function = None        ## None or UserDefFunction, current function context
         self.loop_tag_stack = []            ## list(), stack of loop AsmTag contexts
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
-        self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
-        self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
+        self.in_expression = False          ## bool, True: currently evaluating an expression
         self.em_instrs = EmulatedInstrs()   ## EmulatedInstrs, set of emulated instructions used
 
-    def compile(self, root_node, do_reduce=True):
-        main_function, userdef_functions = self.compile_1st_stage(root_node)
-        if self.log.error_count == 0:
-            all_asm_bufs = self.compile_2nd_stage(main_function, userdef_functions, do_reduce)
-            self.compile_3rd_stage(all_asm_bufs)
-
-    def encode_asm(self, use_comments=False, file=None):
-        asm_lines = []
-        if use_comments:
-            asm_lines.append('; VM variables:')
-            asm_lines.append(';')
-            asm_lines.append(';  v0: reserved: SCR0')
-            asm_lines.append(';  v1: reserved: ARG0')
-            asm_lines.append(';  v2: reserved: ARG1')
-            asm_lines.append(';  v3: reserved: ARG2')
-            for asm_var in self.all_asm_vars:
-                var_sym = asm_var.var_sym
-                coord = var_sym.decl_node.coord
-                filename, row = self.c_sources.map_coord(coord.line)
-                fqname = var_sym.cname
-                if var_sym.context_function is not None:
-                    fqname = f'{var_sym.context_function.func_name}.{fqname}'
-                asm_lines.append(f'; {asm_var!s: >3}: '
-                       f'{PurePath(filename).name}:{row}:{coord.column}: '
-                       f'{var_sym.ctype} {fqname}')
-        for i_buf, asm_buf in enumerate(self.all_asm_bufs):
-            if len(asm_lines) > 0:
-                asm_lines.append('')
-            asm_lines.extend(asm_buf.format_statements(use_comments))
-        result = '\n'.join(asm_lines)
-        if file is not None:
-            print(result, file=file)
-        return result
+    def compile(self, ast_root_node):
+        for node in ast_root_node:
+            try:
+                if isinstance(node, (c_ast.Decl, c_ast.FuncDef)):
+                    self.compile_statement(node)
+                else:
+                    raise PccError(node, 'unsupported syntax')
+            except PccError as e:
+                self.log.error(e)
+        return self.log.error_count
 
     ## Private functions
 
@@ -792,88 +765,6 @@ class Pcc:
         return result
 
     ## Code-generating functions
-
-    def compile_1st_stage(self, root_node):
-        ## compile top-level declarations and user-defined functions
-        for node in root_node:
-            try:
-                if isinstance(node, (c_ast.Decl, c_ast.FuncDef)):
-                    self.compile_statement(node)
-                else:
-                    raise PccError(node, 'unsupported syntax')
-            except PccError as e:
-                self.log.error(e)
-        ## collect user-defined functions and main function
-        userdef_functions = []
-        main_function = None
-        for func_name, function in self.functions.items():
-            if isinstance(function, UserDefFunction):
-                if func_name == 'main':
-                    main_function = function
-                else:
-                    userdef_functions.append(function)
-        ## incrementally drop non-called function hierarchies
-        while len(userdef_functions) > 0:
-            functions_passed = []
-            func_names_dropped = set()
-            for function in userdef_functions:
-                if len(function.caller) > 0:
-                    functions_passed.append(function)
-                else:
-                    func_names_dropped.add(function.func_name)
-            if len(func_names_dropped) == 0:
-                break
-            for function in functions_passed:
-                function.caller -= func_names_dropped
-                self.em_instrs.drop_caller(func_names_dropped)
-            userdef_functions = functions_passed
-        ## check user-defined functions and main function
-        for function in userdef_functions:
-            if function.impl_node is None:
-                self.log.error(PccError(function.decl_node,
-                    f'missing "{function.func_name}()" function implementation'))
-        if main_function is None or main_function.impl_node is None:
-            self.log.error(PccError(None, 'missing "main()" function implementation'))
-        return main_function, userdef_functions
-
-    def compile_2nd_stage(self, main_function, userdef_functions, do_reduce):
-        ## drop unused tags in user-defined functions
-        tags = {}   ## dict(AsmTag asm_tag: int use_count), preseed w. user-defined functions
-        for function in userdef_functions:
-            tags[function.asm_tag] = 1
-        userdef_asm_bufs = [main_function.asm_buf] + [f.asm_buf for f in userdef_functions]
-        for asm_buf in userdef_asm_bufs:
-            asm_buf.drop_unused_tags(tags.copy())
-            if do_reduce:
-                asm_buf.reduce()
-        ## merge main() function body into init segment
-        main_function.asm_buf.replace_instruction('RET', 'HALT')
-        self.asm_buf.extend(main_function.asm_buf)
-        return [self.asm_buf] + userdef_asm_bufs[1:] + self.em_instrs.asm_bufs()
-
-    def compile_3rd_stage(self, all_asm_bufs):
-        ## bind VM tags
-        tag_count = 0
-        tag_base = 0
-        for asm_buf in all_asm_bufs:
-            n_tags = asm_buf.bind_tags(tag_base)
-            tag_count += n_tags
-            tag_base = ((tag_base + n_tags + 10) // 10) * 10
-        ## bind VM variables
-        global_asm_vars = dict()    ## dict(AsmVar asm_var: any)
-        local_asm_vars = dict()     ## dict(AsmVar asm_var: any)
-        for asm_buf in all_asm_bufs:
-            asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
-        all_asm_vars = list(global_asm_vars.keys()) + list(local_asm_vars.keys())
-        var_count = 1 + len(ARG_REGS)
-        for asm_var in all_asm_vars:
-            asm_var.bind(var_count)
-            var_count += 1
-        ## store results
-        self.tag_count = tag_count
-        self.var_count = var_count
-        self.all_asm_bufs = all_asm_bufs
-        self.all_asm_vars = all_asm_vars
 
     def compile_expression(self, node):                 ## A := (node-expr), F := undef/A (CIS/EIS)
         node_term = self.try_parse_term(node)
@@ -1118,7 +1009,7 @@ class Pcc:
             self.log.error(e, context_function=function)
         finally:
             self.pop_scope()
-            self.asm_out = self.asm_buf
+            self.asm_out = self.init_asm_buf
             self.context_function = None
         return False
 
@@ -1268,6 +1159,130 @@ class Pcc:
 
 ## ---------------------------------------------------------------------------
 
+class Pcc:
+    def __init__(self, log, c_sources):
+        self.log = log                      ## PccLogger, log sink
+        self.c_sources = c_sources          ## CSourceBundle, C sources to compile
+        self.var_count = None               ## int, number of VM variables allocated
+        self.tag_count = None               ## int, number of VM tags allocated
+        self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
+        self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
+
+    def compile(self, ast_root_node, do_reduce=True):
+        ## compile AST into intermediate representation
+        astcc = AstCompiler(self.log, self.c_sources)
+        if astcc.compile(ast_root_node) != 0:
+            return self.log.error_count
+        init_asm_buf, functions = astcc.init_asm_buf, astcc.functions
+
+        ## collect main and user-defined functions
+        main_function = None
+        userdef_functions = []
+        for func_name, function in functions.items():
+            if isinstance(function, UserDefFunction):
+                if func_name == 'main':
+                    main_function = function
+                else:
+                    userdef_functions.append(function)
+
+        ## incrementally drop non-called functions
+        while len(userdef_functions) > 0:
+            functions_passed = []
+            func_names_dropped = set()
+            for function in userdef_functions:
+                if len(function.caller) > 0:
+                    functions_passed.append(function)
+                else:
+                    func_names_dropped.add(function.func_name)
+            if len(func_names_dropped) == 0:
+                break
+            for function in functions_passed:
+                function.caller -= func_names_dropped
+            userdef_functions = functions_passed
+            astcc.em_instrs.drop_caller(func_names_dropped)
+
+        ## check main and user-defined function definitions
+        for function in userdef_functions:
+            if function.impl_node is None:
+                self.log.error(PccError(function.decl_node,
+                    f'missing "{function.func_name}()" function implementation'))
+        if main_function is None or main_function.impl_node is None:
+            self.log.error(PccError(None, 'missing "main()" function implementation'))
+
+        if self.log.error_count != 0:
+            return self.log.error_count
+
+        ## drop unused tags in main and user-defined functions
+        tags = {}   ## dict(AsmTag asm_tag: int use_count), preseed w. user-defined functions
+        for function in userdef_functions:
+            tags[function.asm_tag] = 1
+        userdef_asm_bufs = [main_function.asm_buf] + [f.asm_buf for f in userdef_functions]
+        for asm_buf in userdef_asm_bufs:
+            asm_buf.drop_unused_tags(tags.copy())
+            if do_reduce:
+                asm_buf.reduce()
+
+        ## merge main() function body into init segment
+        main_function.asm_buf.replace_instruction('RET', 'HALT')
+        init_asm_buf.extend(main_function.asm_buf)
+        all_asm_bufs = [init_asm_buf] + userdef_asm_bufs[1:] + astcc.em_instrs.asm_bufs()
+
+        ## bind VM tags
+        tag_count = 0
+        tag_base = 0
+        for asm_buf in all_asm_bufs:
+            n_tags = asm_buf.bind_tags(tag_base)
+            tag_count += n_tags
+            tag_base = ((tag_base + n_tags + 10) // 10) * 10
+
+        ## bind VM variables
+        global_asm_vars = dict()    ## dict(AsmVar asm_var: any)
+        local_asm_vars = dict()     ## dict(AsmVar asm_var: any)
+        for asm_buf in all_asm_bufs:
+            asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
+        all_asm_vars = list(global_asm_vars.keys()) + list(local_asm_vars.keys())
+        var_count = 1 + len(ARG_REGS)
+        for asm_var in all_asm_vars:
+            asm_var.bind(var_count)
+            var_count += 1
+
+        ## store results
+        self.var_count = var_count
+        self.tag_count = tag_count
+        self.all_asm_bufs = all_asm_bufs
+        self.all_asm_vars = all_asm_vars
+        return self.log.error_count
+
+    def encode_asm(self, use_comments=False, file=None):
+        asm_lines = []
+        if use_comments:
+            asm_lines.append('; VM variables:')
+            asm_lines.append(';')
+            asm_lines.append(';  v0: reserved: SCR0')
+            asm_lines.append(';  v1: reserved: ARG0')
+            asm_lines.append(';  v2: reserved: ARG1')
+            asm_lines.append(';  v3: reserved: ARG2')
+            for asm_var in self.all_asm_vars:
+                var_sym = asm_var.var_sym
+                coord = var_sym.decl_node.coord
+                filename, row = self.c_sources.map_coord(coord.line)
+                fqname = var_sym.cname
+                if var_sym.context_function is not None:
+                    fqname = f'{var_sym.context_function.func_name}.{fqname}'
+                asm_lines.append(f'; {asm_var!s: >3}: '
+                       f'{PurePath(filename).name}:{row}:{coord.column}: '
+                       f'{var_sym.ctype} {fqname}')
+        for i_buf, asm_buf in enumerate(self.all_asm_bufs):
+            if len(asm_lines) > 0:
+                asm_lines.append('')
+            asm_lines.extend(asm_buf.format_statements(use_comments))
+        result = '\n'.join(asm_lines)
+        if file is not None:
+            print(result, file=file)
+        return result
+
+## ---------------------------------------------------------------------------
+
 class CSourceBundle:
     def read_files(self, filenames):
         self.c_source_files = {}    ## dict(str filename: list(str line))
@@ -1322,11 +1337,9 @@ def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
             log.error_msg(flat_row, col, message)
         print('*** aborted with parser error', file=sys.stderr)
         return None
-    ## translate AST into assembly language
+    ## compile AST into assembly language
     cc = Pcc(log, c_sources)
-    cc.compile(ast, do_reduce=do_reduce)
-    if log.error_count != 0:
-
+    if cc.compile(ast, do_reduce=do_reduce) != 0:
         print('*** aborted with compiler error(s)', file=sys.stderr)
         return None
     return cc
