@@ -408,7 +408,7 @@ class UserDefFunction(Function):
         self.static_asm_tags = {}       ## dict(str tag_label: AsmTag asm_tag), user-defined static tags
 
 class VmApiFunction(Function):
-    VM_FUNCTION_INSTR = {
+    VM_FUNCTION_INSTR_CIS = {
         'gpioSetMode':                  'MODES',    ## Basic commands
         'gpioGetMode':                  'MODEG',
         'gpioSetPullUpDown':            'PUD',
@@ -464,21 +464,29 @@ class VmApiFunction(Function):
         'eventWait':                    'EVTWT',
         'exit':                         'HALT' }
 
-    def __init__(self, decl_node, use_cis=True):
+    VM_FUNCTION_INSTR_EIS = {
+        'gpioSetMode':                  'MI',       ## EIS: normal prototype MI x1 x2
+        'gpioSetPullUpDown':            'PUDI' }    ## EIS: normal prototype PUDI x1 x2
+
+    def __init__(self, decl_node, use_cis):
         super().__init__(decl_node, True)
-        if self.func_name not in self.VM_FUNCTION_INSTR:
-            raise PccError(decl_node, f'undefined VM function "{self.func_name}"')
-        self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
+        self.use_cis = use_cis
+        self.instr = None
         if use_cis:
-            self.map_argument = getattr(self, f'_map_argument_{self.func_name}', self._map_argument_default)
-        else:
-            VmApiFunction.VM_FUNCTION_INSTR['gpioSetMode']       = 'MI'     ## EIS: standard prototype (int, int)
-            VmApiFunction.VM_FUNCTION_INSTR['gpioSetPullUpDown'] = 'PUDI'   ## EIS: standard prototype (int, int)
+            self.map_argument = getattr(self, f'_map_argument_cis_{self.func_name}', None)
 
-    def _map_argument_default(self, node, i_arg, const_arg):
-        return const_arg
+    def vm_func_instr(self):
+        if self.instr is None:
+            func_name = self.func_name
+            if not self.use_cis and func_name in self.VM_FUNCTION_INSTR_EIS:
+                self.instr = self.VM_FUNCTION_INSTR_EIS[func_name]
+            else:
+                if func_name not in self.VM_FUNCTION_INSTR_CIS:
+                    raise PccError(self.decl_node, f'undefined VM function "{func_name}"')
+                self.instr = self.VM_FUNCTION_INSTR_CIS[func_name]
+        return self.instr
 
-    def _map_argument_gpioSetMode(self, node, i_arg, const_arg):
+    def _map_argument_cis_gpioSetMode(self, node, i_arg, const_arg):
         if i_arg == 1:
             ## int gpioSetMode(unsigned gpio, unsigned mode), 2nd argument "mode":
             ##   index     | 0        | 1         | 2       | 3       | 4       | 5       | 6       | 7
@@ -491,7 +499,7 @@ class VmApiFunction(Function):
                 const_arg = 'RW540123'[const_int]
         return const_arg
 
-    def _map_argument_gpioSetPullUpDown(self, node, i_arg, const_arg):
+    def _map_argument_cis_gpioSetPullUpDown(self, node, i_arg, const_arg):
         if i_arg == 1:
             ## int gpioSetPullUpDown(unsigned gpio, unsigned pud), 2nd argument "pud":
             ##   index    | 0          | 1           | 2
@@ -561,7 +569,7 @@ class UserDefFunctionSymbol(FunctionSymbol):
 
 class VmApiFunctionSymbol(FunctionSymbol):
     def asm_repr(self):                 ## str vm_func_instr, VM function's assembly language instruction
-        return self.function.vm_func_instr
+        return self.function.vm_func_instr()
 
 ## ---------------------------------------------------------------------------
 
@@ -722,7 +730,7 @@ class AstCompiler:
     def declare_function(self, node, is_vm_function=False):
         ## find or create global Function object
         if is_vm_function:
-            function = VmApiFunction(node, use_cis=self.use_cis)
+            function = VmApiFunction(node, self.use_cis)
         else:
             function = UserDefFunction(node)
         func_name = node.name
@@ -904,18 +912,18 @@ class AstCompiler:
         if rhs_term is not None:
             if self.use_cis and self.em_instrs.is_emulated(op_instr):
                 self.asm_out('LD', SCR0, rhs_term)
-                self.em_instrs.compile(self, op_instr)  ## A := A <OP> x; F := undef
+                self.em_instrs.compile(self, op_instr)  ## CIS: A := A <OP> x; F := undef
             else:
-                self.asm_out(op_instr, rhs_term)        ## A := A <OP> x, F := A
+                self.asm_out(op_instr, rhs_term)        ## CIS/EIS: A := A <OP> x, F := A
         else:
             self.asm_out('PUSHA')                       ## save ACC (lhs) onto stack
             self.compile_expression(node.right)         ## A := (rhs-expr); F := undef/A (CIS/EIS)
             self.asm_out('STA', SCR0)                   ## SCR0 := A
             self.asm_out('POPA')                        ## restore lhs in ACC from stack
             if self.use_cis and self.em_instrs.is_emulated(op_instr):
-                self.em_instrs.compile(self, op_instr)  ## A := A <OP> SCR0; F := undef
+                self.em_instrs.compile(self, op_instr)  ## CIS: A := A <OP> SCR0; F := undef
             else:
-                self.asm_out(op_instr, SCR0)            ## A := A <OP> SCR0, F := A
+                self.asm_out(op_instr, SCR0)            ## CIS/EIS: A := A <OP> SCR0, F := A
         return False
 
     def _compile_Assignment_node(self, node):
@@ -1052,7 +1060,7 @@ class AstCompiler:
             for i_arg in range(function.arg_count):
                 arg_expr_node = node.args.exprs[i_arg]
                 arg_term = None
-                if self.use_cis:
+                if self.use_cis and function.map_argument is not None:
                     arg_term = function.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
                 if arg_term is None:
                     arg_term = self.try_parse_term(arg_expr_node)
