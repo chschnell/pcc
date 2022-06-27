@@ -723,7 +723,7 @@ class AstCompiler:
         return self.bind_symbol(node, VmVariableSymbol(ctype, cname, asm_var, node, self.context_function))
 
     def declare_parameter(self, node, ctype, cname):
-        m = re.fullmatch('(?:.*_)?(p[0-9])(?:_.*)?', cname)
+        m = re.fullmatch(r'(?:.*_)?(p[0-9])(?:_.*)?', cname)
         if not m:
             raise PccError(node, 'external variable names must contain one of "p0", "p1", ..., "p9"')
         vm_param_name = m.groups(0)[0]
@@ -1249,7 +1249,7 @@ def pcc(filenames, use_cis=True, do_reduce=True, use_comments=False, debug=False
     try:
         ast = CParser().parse(c_translation_unit)
     except ParseError as e:
-        m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
+        m = re.fullmatch(r'[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
         if m is None:
             print(e, file=sys.stderr)
         else:
