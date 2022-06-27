@@ -350,7 +350,7 @@ class EmulatedInstrs:
 
 ## ---------------------------------------------------------------------------
 
-class Function:
+class FunctionPrototype:
     def __init__(self, decl_node, is_vm_function):
         arg_ctypes = []
         func_args = decl_node.type.args
@@ -358,20 +358,14 @@ class Function:
                 self._parse_ctype(func_args.params[0].type, accept_void=True, accept_uint=is_vm_function) == 'void'):
             for arg in func_args.params:
                 arg_ctypes.append(self._parse_ctype(arg.type, accept_uint=is_vm_function))
-        self.decl_node = decl_node
-        self.func_name = decl_node.name
-        self.ret_ctype = self._parse_ctype(decl_node.type.type, accept_void=True, accept_uint=is_vm_function)
+        self.is_vm_function = is_vm_function
         self.arg_ctypes = arg_ctypes
-        self.arg_count = len(arg_ctypes)
-        self.has_return = self.ret_ctype != 'void'
-
-    def decl_str(self):
-        return f'{self.ret_ctype} {self.func_name}({", ".join(self.arg_ctypes)})'
+        self.ret_ctype = self._parse_ctype(decl_node.type.type, accept_void=True, accept_uint=is_vm_function)
 
     def matches(self, other):
-        return type(self) is type(other) and \
-               self.arg_ctypes == other.arg_ctypes and \
-               self.ret_ctype == other.ret_ctype
+        return self.is_vm_function == other.is_vm_function and \
+            self.arg_ctypes == other.arg_ctypes and \
+            self.ret_ctype == other.ret_ctype
 
     def _parse_ctype(self, node, accept_void=False, accept_uint=False):
         if isinstance(node.type, c_ast.IdentifierType):
@@ -390,9 +384,20 @@ class Function:
             raise PccError(node.type, f'unsupported type "{" ".join(type_names)}"')
         raise PccError(node.type, 'unsupported type')
 
+class Function:
+    def __init__(self, decl_node, prototype):
+        self.decl_node = decl_node
+        self.func_name = decl_node.name
+        self.prototype = prototype
+        self.arg_count = len(prototype.arg_ctypes)
+        self.has_return = prototype.ret_ctype != 'void'
+
+    def decl_str(self):
+        return f'{self.prototype.ret_ctype} {self.func_name}({", ".join(self.prototype.arg_ctypes)})'
+
 class UserDefFunction(Function):
-    def __init__(self, decl_node):
-        super().__init__(decl_node, False)
+    def __init__(self, decl_node, prototype):
+        super().__init__(decl_node, prototype)
         if self.func_name == 'main':
             ## check main() function prototype constraints
             if self.has_return:
@@ -468,8 +473,8 @@ class VmApiFunction(Function):
         'gpioSetMode':                  'MI',       ## EIS: normal prototype MI x1 x2
         'gpioSetPullUpDown':            'PUDI' }    ## EIS: normal prototype PUDI x1 x2
 
-    def __init__(self, decl_node, use_cis):
-        super().__init__(decl_node, True)
+    def __init__(self, decl_node, prototype, use_cis):
+        super().__init__(decl_node, prototype)
         self.use_cis = use_cis
         self.instr = None
         if use_cis:
@@ -728,23 +733,28 @@ class AstCompiler:
         return self.bind_symbol(node, VmParameterSymbol(ctype, cname, vm_param_name))
 
     def declare_function(self, node, is_vm_function=False):
-        ## find or create global Function object
-        if is_vm_function:
-            function = VmApiFunction(node, self.use_cis)
-        else:
-            function = UserDefFunction(node)
+        ## return previously bound symbol if exists
         func_name = node.name
-        if func_name not in self.functions:
-            self.functions[func_name] = function
-        else:
-            if not function.matches(self.functions[func_name]):
-                raise PccError(node, 'function prototype conflicts with previous declaration')
-            function = self.functions[func_name]
-        ## return previously declared function symbol or bind new symbol to current scope
+        prototype = FunctionPrototype(node, is_vm_function)
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is not None:
-            return func_sym
-        elif is_vm_function:
+            if func_sym.function.prototype.matches(prototype):
+                return func_sym
+            else:
+                raise PccError(node, 'function prototype conflicts with previous declaration')
+        ## find or create distinct Function object
+        if func_name in self.functions:
+            function = self.functions[func_name]
+            if not function.prototype.matches(prototype):
+                raise PccError(node, 'function prototype conflicts with previous declaration')
+        else:
+            if is_vm_function:
+                function = VmApiFunction(node, prototype, self.use_cis)
+            else:
+                function = UserDefFunction(node, prototype)
+            self.functions[func_name] = function
+        ## bind new symbol
+        if is_vm_function:
             func_sym = VmApiFunctionSymbol(func_name, function)
         else:
             func_sym = UserDefFunctionSymbol(func_name, function)
@@ -1020,7 +1030,7 @@ class AstCompiler:
                 self.asm_out('TAG', function.asm_tag, comment=function.decl_str())
             if function.arg_count > 0:
                 arg_vars = function.arg_vars
-                arg_ctypes = function.arg_ctypes
+                arg_ctypes = function.prototype.arg_ctypes
                 for i_arg, arg_param in enumerate(node.decl.type.args.params):
                     arg_ctype = arg_ctypes[i_arg]
                     arg_cname = arg_param.name
