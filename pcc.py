@@ -671,10 +671,7 @@ class AstCompiler:
     def compile(self, ast_root_node):
         for node in ast_root_node:
             try:
-                if isinstance(node, (c_ast.Decl, c_ast.FuncDef)):
-                    self.compile_statement(node)
-                else:
-                    raise PccError(node, 'unsupported syntax')
+                self.compile_statement(node)
             except PccError as e:
                 self.log.error(e)
         return self.log.error_count
@@ -744,20 +741,17 @@ class AstCompiler:
                 raise PccError(node, 'function prototype conflicts with previous declaration')
         ## find or create distinct Function object
         if func_name in self.functions:
-            function = self.functions[func_name]
-            if not function.prototype.matches(prototype):
+            if not self.functions[func_name].prototype.matches(prototype):
                 raise PccError(node, 'function prototype conflicts with previous declaration')
+        elif is_vm_function:
+            self.functions[func_name] = VmApiFunction(node, prototype, self.use_cis)
         else:
-            if is_vm_function:
-                function = VmApiFunction(node, prototype, self.use_cis)
-            else:
-                function = UserDefFunction(node, prototype)
-            self.functions[func_name] = function
+            self.functions[func_name] = UserDefFunction(node, prototype)
         ## bind new symbol
         if is_vm_function:
-            func_sym = VmApiFunctionSymbol(func_name, function)
+            func_sym = VmApiFunctionSymbol(func_name, self.functions[func_name])
         else:
-            func_sym = UserDefFunctionSymbol(func_name, function)
+            func_sym = UserDefFunctionSymbol(func_name, self.functions[func_name])
         return self.bind_symbol(node, func_sym)
 
     def try_parse_constant(self, node):
