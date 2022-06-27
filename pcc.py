@@ -464,27 +464,18 @@ class VmApiFunction(Function):
         'eventWait':                    'EVTWT',
         'exit':                         'HALT' }
 
-    def __init__(self, decl_node):
+    def __init__(self, decl_node, use_cis=True):
         super().__init__(decl_node, True)
         if self.func_name not in self.VM_FUNCTION_INSTR:
             raise PccError(decl_node, f'undefined VM function "{self.func_name}"')
         self.vm_func_instr = self.VM_FUNCTION_INSTR[self.func_name]
-        self.map_argument = getattr(self, f'_map_argument_{self.func_name}', self._map_argument_default)
+        if use_cis:
+            self.map_argument = getattr(self, f'_map_argument_{self.func_name}', self._map_argument_default)
+        else:
+            VmApiFunction.VM_FUNCTION_INSTR['gpioSetMode']       = 'MI'     ## EIS: standard prototype (int, int)
+            VmApiFunction.VM_FUNCTION_INSTR['gpioSetPullUpDown'] = 'PUDI'   ## EIS: standard prototype (int, int)
 
     def _map_argument_default(self, node, i_arg, const_arg):
-        return const_arg
-
-    def _map_argument_gpioSetPullUpDown(self, node, i_arg, const_arg):
-        if i_arg == 1:
-            ## int gpioSetPullUpDown(unsigned gpio, unsigned pud), 2nd argument "pud":
-            ##   index    | 0          | 1           | 2
-            ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
-            ##   PUD g p  | "O"        | "D"         | "U"
-            if const_arg is None:
-                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
-            const_int = int(const_arg, 0)
-            if const_int >= 0 and const_int <= 2:
-                const_arg = 'ODU'[const_int]
         return const_arg
 
     def _map_argument_gpioSetMode(self, node, i_arg, const_arg):
@@ -498,6 +489,19 @@ class VmApiFunction(Function):
             const_int = int(const_arg, 0)
             if const_int >= 0 and const_int <= 7:
                 const_arg = 'RW540123'[const_int]
+        return const_arg
+
+    def _map_argument_gpioSetPullUpDown(self, node, i_arg, const_arg):
+        if i_arg == 1:
+            ## int gpioSetPullUpDown(unsigned gpio, unsigned pud), 2nd argument "pud":
+            ##   index    | 0          | 1           | 2
+            ##   vm_api.h | PI_PUD_OFF | PI_PUD_DOWN | PI_PUD_UP
+            ##   PUD g p  | "O"        | "D"         | "U"
+            if const_arg is None:
+                raise PccError(node, f'{self.decl_str()}: compile-time constant required for 2nd argument')
+            const_int = int(const_arg, 0)
+            if const_int >= 0 and const_int <= 2:
+                const_arg = 'ODU'[const_int]
         return const_arg
 
 ## ---------------------------------------------------------------------------
@@ -635,9 +639,10 @@ class AstCompiler:
         '<':  'LT',                         ## A=(A <  x); F=undef/A (CIS/EIS); A:(0|1)
         '<=': 'LE' }                        ## A=(A <= x); F=undef/A (CIS/EIS); A:(0|1)
 
-    def __init__(self, log, c_sources):
+    def __init__(self, log, c_sources, use_cis=True):
         self.log = log                      ## PccLogger, log sink
         self.c_sources = c_sources          ## CSourceBundle, C sources to compile
+        self.use_cis = use_cis              ## bool, True: use classic instruction set, else: extended instruction set
         self.functions = {}                 ## dict(str func_name: Function function), user-defined and VM API functions
         self.init_asm_buf = AsmBuffer()     ## AsmBuffer, topmost output buffer
         self.asm_out = self.init_asm_buf    ## AsmBuffer, current output buffer
@@ -647,7 +652,8 @@ class AstCompiler:
         self.loop_continue_tag = None       ## None or AsmTag, current tag to JMP to in case of a "continue" statement
         self.loop_break_tag = None          ## None or AsmTag, current tag to JMP to in case of a "break" statement
         self.in_expression = False          ## bool, True: currently evaluating an expression
-        self.em_instrs = EmulatedInstrs()   ## EmulatedInstrs, set of emulated instructions used
+        if use_cis:
+            self.em_instrs = EmulatedInstrs() ## EmulatedInstrs, set of emulated instructions used
 
     def compile(self, ast_root_node):
         for node in ast_root_node:
@@ -716,7 +722,7 @@ class AstCompiler:
     def declare_function(self, node, is_vm_function=False):
         ## find or create global Function object
         if is_vm_function:
-            function = VmApiFunction(node)
+            function = VmApiFunction(node, use_cis=self.use_cis)
         else:
             function = UserDefFunction(node)
         func_name = node.name
@@ -764,15 +770,18 @@ class AstCompiler:
 
     ## Code-generating functions
 
-    def compile_expression(self, node):                 ## A := (node-expr), F := undef/A (CIS/EIS)
+    def compile_expression(self, node):
         node_term = self.try_parse_term(node)
         if node_term is not None:
-            self.asm_out('LDA', node_term)
+            if self.use_cis:
+                self.asm_out('LDA', node_term)          ## CIS: A := (node-expr), F := undef
+            else:
+                self.asm_out('LDAF', node_term)         ## EIS: A := (node-expr), F := A
         elif isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.Assignment, c_ast.FuncCall)):
             prev_in_expression = self.in_expression
             self.in_expression = True
             try:
-                self.compile_statement(node)
+                self.compile_statement(node)            ## A := (node-expr); F := undef/A (CIS/EIS)
             finally:
                 self.in_expression = prev_in_expression
         else:
@@ -784,7 +793,10 @@ class AstCompiler:
             if rhs_term is not None:
                 self.asm_out('LD', dst_reg, rhs_term)   ## dst_reg := (rhs-term)
                 if self.in_expression:
-                    self.asm_out('LDA', dst_reg)        ## A := dst_reg; F := undef/A (CIS/EIS)
+                    if self.use_cis:
+                        self.asm_out('LDA', dst_reg)    ## CIS: A := dst_reg; F := undef
+                    else:
+                        self.asm_out('LDAF', dst_reg)   ## EIS: A := dst_reg; F := A
             else:
                 self.compile_expression(rhs_node)       ## A := (rhs-expr); F := undef/A (CIS/EIS)
                 self.asm_out('STA', dst_reg)            ## dst_reg := A
@@ -849,25 +861,34 @@ class AstCompiler:
             if reg_sym is None:
                 raise PccError(node.expr, f'undefined variable "{node.expr.name}"')
             vm_reg = reg_sym.asm_repr()
-            if node.op == '++':                     ## Prefix increment "++X":
-                self.asm_out('INR', vm_reg)         ## ++X, F := X
-                self.asm_out('LDA', vm_reg)         ## A := X, F := A
-            elif node.op == '--':                   ## Prefix deccrement "--X":
-                self.asm_out('DCR', vm_reg)         ## --X, F := X
-                self.asm_out('LDA', vm_reg)         ## A := X, F := A
-            elif node.op == 'p++':                  ## Postfix increment "X++":
-                self.asm_out('LD', SCR0, vm_reg)    ## SCR0 := X
-                self.asm_out('INR', vm_reg)         ## ++X, F := X
-                self.asm_out('LDA', SCR0)           ## A := SCR0, F := undef/A (CIS/EIS)
-            elif node.op == 'p--':                  ## Postfix decrement "X--":
-                self.asm_out('LD', SCR0, vm_reg)    ## SCR0 := X
-                self.asm_out('DCR', vm_reg)         ## --X, F := X
-                self.asm_out('LDA', SCR0)           ## A := SCR0; F := undef/A (CIS/EIS)
+            if node.op == '++':                         ## Prefix increment "++X":
+                self.asm_out('INR', vm_reg)             ## ++X, F := X
+                self.asm_out('LDA', vm_reg)             ## A := X, F := A
+            elif node.op == '--':                       ## Prefix deccrement "--X":
+                self.asm_out('DCR', vm_reg)             ## --X, F := X
+                self.asm_out('LDA', vm_reg)             ## A := X, F := A
+            elif node.op == 'p++':                      ## Postfix increment "X++":
+                self.asm_out('LD', SCR0, vm_reg)        ## SCR0 := X
+                self.asm_out('INR', vm_reg)             ## ++X, F := X
+                if self.use_cis:
+                    self.asm_out('LDA', SCR0)           ## CIS: A := SCR0, F := undef
+                else:
+                    self.asm_out('LDAF', SCR0)          ## EIS: A := SCR0, F := A
+            elif node.op == 'p--':                      ## Postfix decrement "X--":
+                self.asm_out('LD', SCR0, vm_reg)        ## SCR0 := X
+                self.asm_out('DCR', vm_reg)             ## --X, F := X
+                if self.use_cis:
+                    self.asm_out('LDA', SCR0)           ## CIS: A := SCR0; F := undef
+                else:
+                    self.asm_out('LDAF', SCR0)          ## EIS: A := SCR0; F := A
         elif node.op in self.UNARY_OP_INSTR:
-            self.compile_expression(node.expr)      ## A := (expr); F := undef/A (CIS/EIS)
+            self.compile_expression(node.expr)          ## A := (expr); F := undef/A (CIS/EIS)
             op_instr = self.UNARY_OP_INSTR[node.op]
             if op_instr is not None:
-                self.em_instrs.compile(self, op_instr) ## A := <OP> A; F := undef
+                if self.use_cis:
+                    self.em_instrs.compile(self, op_instr) ## CIS: A := <OP> A; F := undef
+                else:
+                    self.asm_out(op_instr)              ## EIS: A := <OP> A; F := A
         else:
             raise PccError(node, f'unsupported unary operator "{node.op}"')
         return False
@@ -877,24 +898,24 @@ class AstCompiler:
             raise PccError(node, f'unsupported binary operator "{node.op}"')
         op_instr = self.BINARY_OP_INSTR[node.op]
         ## compile left-hand side (lhs) into ACC
-        self.compile_expression(node.left)          ## A := (lhs-expr); F := undef/A (CIS/EIS)
+        self.compile_expression(node.left)              ## A := (lhs-expr); F := undef/A (CIS/EIS)
         ## compile right-hand side (rhs) and combine with lhs using <OP>
         rhs_term = self.try_parse_term(node.right)
         if rhs_term is not None:
-            if self.em_instrs.is_emulated(op_instr):
+            if self.use_cis and self.em_instrs.is_emulated(op_instr):
                 self.asm_out('LD', SCR0, rhs_term)
-                self.em_instrs.compile(self, op_instr) ## A := A <OP> x; F := undef
+                self.em_instrs.compile(self, op_instr)  ## A := A <OP> x; F := undef
             else:
-                self.asm_out(op_instr, rhs_term)    ## A := A <OP> x, F := A
+                self.asm_out(op_instr, rhs_term)        ## A := A <OP> x, F := A
         else:
-            self.asm_out('PUSHA')                   ## save ACC (lhs) onto stack
-            self.compile_expression(node.right)     ## A := (rhs-expr); F := undef/A (CIS/EIS)
-            self.asm_out('STA', SCR0)               ## SCR0 := A
-            self.asm_out('POPA')                    ## restore lhs in ACC from stack
-            if self.em_instrs.is_emulated(op_instr):
-                self.em_instrs.compile(self, op_instr) ## A := A <OP> SCR0; F := undef
+            self.asm_out('PUSHA')                       ## save ACC (lhs) onto stack
+            self.compile_expression(node.right)         ## A := (rhs-expr); F := undef/A (CIS/EIS)
+            self.asm_out('STA', SCR0)                   ## SCR0 := A
+            self.asm_out('POPA')                        ## restore lhs in ACC from stack
+            if self.use_cis and self.em_instrs.is_emulated(op_instr):
+                self.em_instrs.compile(self, op_instr)  ## A := A <OP> SCR0; F := undef
             else:
-                self.asm_out(op_instr, SCR0)        ## A := A <OP> SCR0, F := A
+                self.asm_out(op_instr, SCR0)            ## A := A <OP> SCR0, F := A
         return False
 
     def _compile_Assignment_node(self, node):
@@ -935,7 +956,7 @@ class AstCompiler:
         elif ret_val_expected and not ret_val_given:
             self.log.warning(node, 'function should return a value', self.context_function)
         elif ret_val_given:
-            self.compile_expression(node.expr)              ## A := (expr); F := A
+            self.compile_expression(node.expr)          ## A := (expr); F := A
         self.asm_out('RET')
         return True
 
@@ -1027,20 +1048,22 @@ class AstCompiler:
             raise PccError(node, f'function expects {function.arg_count} argument(s) instead of {arg_count}')
         if isinstance(func_sym, VmApiFunctionSymbol):
             ## compile call to VM API function
-            args = []
+            asm_args = []
             for i_arg in range(function.arg_count):
                 arg_expr_node = node.args.exprs[i_arg]
-                arg_term = function.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
+                arg_term = None
+                if self.use_cis:
+                    arg_term = function.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
                 if arg_term is None:
                     arg_term = self.try_parse_term(arg_expr_node)
                 if arg_term is None:
                     arg_term = ARG_REGS[i_arg]
                     self.compile_assignment(arg_term, arg_expr_node)
-                args.append(arg_term)
+                asm_args.append(arg_term)
             asm_instr = func_sym.asm_repr()
             if asm_instr == 'HALT':
                 returned = True
-            self.asm_out(asm_instr, *args, comment=f'{func_name}();')               ## A := vm_api_func(); F := A
+            self.asm_out(asm_instr, *asm_args, comment=f'{func_name}();')           ## A := vm_api_func(); F := A
         else:
             ## compile call to user defined function
             if function is not self.context_function:
@@ -1056,7 +1079,8 @@ class AstCompiler:
         else_tag = AsmTag() if node.iffalse is not None else None
         endif_tag = AsmTag()
         self.compile_expression(node.cond)                  ## A := (cond); F := undef/A (CIS/EIS)
-        self.asm_out('OR', 0, comment='F=A')                ## assert F := A before conditional jump
+        if self.use_cis:
+            self.asm_out('OR', 0, comment='F=A')            ## CIS: assert F := A before conditional jump
         if else_tag is None:
             self.asm_out('JZ', endif_tag)                   ## NOT A AND no-else-branch: GOTO endif_tag
         else:
@@ -1078,7 +1102,8 @@ class AstCompiler:
         try:
             self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
             self.compile_expression(node.cond)              ## A := (cond); F := undef/A (CIS/EIS)
-            self.asm_out('OR', 0, comment='F=A')            ## assert F := A before conditional jump
+            if self.use_cis:
+                self.asm_out('OR', 0, comment='F=A')        ## CIS: assert F := A before conditional jump
             self.asm_out('JZ', end_tag)                     ## cond == FALSE: GOTO end_tag
             returned = self.compile_statement(node.stmt)    ## compile statement(s)
             self.asm_out('JMP', begin_tag)                  ## GOTO begin_tag
@@ -1095,7 +1120,8 @@ class AstCompiler:
             self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
             returned = self.compile_statement(node.stmt)    ## compile statement(s)
             self.compile_expression(node.cond)              ## A := (cond); F := undef/A (CIS/EIS)
-            self.asm_out('OR', 0, comment='F=A')            ## assert F := A before conditional jump
+            if self.use_cis:
+                self.asm_out('OR', 0, comment='F=A')        ## CIS: assert F := A before conditional jump
             self.asm_out('JNZ', begin_tag)                  ## cond == TRUE: GOTO begin_tag
             self.asm_out('TAG', end_tag)                    ## TAG: end_tag
         finally:
@@ -1121,7 +1147,8 @@ class AstCompiler:
                 self.asm_out('TAG', begin_tag)                  ## TAG: begin_tag
                 if node.cond is not None:
                     self.compile_expression(node.cond)          ## A := (cond); F := undef/A (CIS/EIS)
-                    self.asm_out('OR', 0, comment='F=A')        ## assert F := A before conditional jump
+                    if self.use_cis:
+                        self.asm_out('OR', 0, comment='F=A')    ## CIS: assert F := A before conditional jump
                     self.asm_out('JZ', end_tag)                 ## cond == FALSE: GOTO end_tag
                 returned = self.compile_statement(node.stmt)    ## compile loop-body statement(s)
                 self.asm_out('TAG', next_tag)                   ## TAG: next_tag
@@ -1154,145 +1181,6 @@ class AstCompiler:
 
     def _compile_EmptyStatement_node(self, node):
         return False
-
-## ---------------------------------------------------------------------------
-
-class PccResult:
-    def __init__(self, c_sources, var_count, tag_count, all_asm_bufs, all_asm_vars):
-        self.c_sources = c_sources
-        self.var_count = var_count
-        self.tag_count = tag_count
-        self.all_asm_bufs = all_asm_bufs
-        self.all_asm_vars = all_asm_vars
-
-    def encode_asm(self, use_comments=False, file=None):
-        ## compile intermediate representation into assembly language
-        asm_lines = []
-        if use_comments:
-            asm_lines.append('; VM variables:')
-            asm_lines.append(';')
-            asm_lines.append(';  v0: reserved: SCR0')
-            asm_lines.append(';  v1: reserved: ARG0')
-            asm_lines.append(';  v2: reserved: ARG1')
-            asm_lines.append(';  v3: reserved: ARG2')
-            for asm_var in self.all_asm_vars:
-                var_sym = asm_var.var_sym
-                coord = var_sym.decl_node.coord
-                filename, row = self.c_sources.map_coord(coord.line)
-                fqname = var_sym.cname
-                if var_sym.context_function is not None:
-                    fqname = f'{var_sym.context_function.func_name}.{fqname}'
-                asm_lines.append(f'; {asm_var!s: >3}: '
-                       f'{PurePath(filename).name}:{row}:{coord.column}: '
-                       f'{var_sym.ctype} {fqname}')
-        for asm_buf in self.all_asm_bufs:
-            if len(asm_lines) > 0:
-                asm_lines.append('')
-            asm_buf.format_statements_to(asm_lines, use_comments)
-        result = '\n'.join(asm_lines)
-        if file is not None:
-            print(result, file=file)
-        return result
-
-class Pcc:
-    def compile(self, filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
-        ## build C translation unit from input files
-        if vm_api_h not in [PurePath(filename).name for filename in filenames]:
-            filenames = [vm_api_h] + filenames
-        c_sources = CSourceBundle()
-        c_translation_unit = c_sources.read_files(filenames)
-        if c_translation_unit is None:
-            return None
-        log = PccLogger(c_sources, debug)
-
-        ## build abstract syntax tree (AST) from C translation unit
-        try:
-            ast = CParser().parse(c_translation_unit)
-        except ParseError as e:
-            m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
-            if m is None:
-                print(e, file=sys.stderr)
-            else:
-                flat_row, col, message = int(m[1]), int(m[2]), m[3]
-                log.error_msg(flat_row, col, message)
-            print('*** aborted with parser error', file=sys.stderr)
-            return None
-
-        ## compile AST into intermediate representation
-        astcc = AstCompiler(log, c_sources)
-        if astcc.compile(ast) != 0:
-            return None
-        init_asm_buf, functions = astcc.init_asm_buf, astcc.functions
-
-        ## collect main and user-defined functions
-        main_function = None
-        userdef_functions = []
-        for func_name, function in functions.items():
-            if isinstance(function, UserDefFunction):
-                if func_name == 'main':
-                    main_function = function
-                else:
-                    userdef_functions.append(function)
-
-        ## incrementally drop non-called functions
-        while len(userdef_functions) > 0:
-            functions_passed = []
-            func_names_dropped = set()
-            for function in userdef_functions:
-                if len(function.caller) > 0:
-                    functions_passed.append(function)
-                else:
-                    func_names_dropped.add(function.func_name)
-            if len(func_names_dropped) == 0:
-                break
-            for function in functions_passed:
-                function.caller -= func_names_dropped
-            userdef_functions = functions_passed
-            astcc.em_instrs.drop_caller(func_names_dropped)
-
-        ## check main and user-defined function definitions
-        for function in userdef_functions:
-            if function.impl_node is None:
-                log.error(PccError(function.decl_node,
-                    f'missing "{function.func_name}()" function implementation'))
-        if main_function is None or main_function.impl_node is None:
-            log.error(PccError(None, 'missing "main()" function implementation'))
-
-        if log.error_count != 0:
-            return None
-
-        ## drop unused tags in main and user-defined functions
-        tags = {}   ## dict(AsmTag asm_tag: int use_count), preseed w. user-defined functions
-        for function in userdef_functions:
-            tags[function.asm_tag] = 1
-        userdef_asm_bufs = [main_function.asm_buf] + [f.asm_buf for f in userdef_functions]
-        for asm_buf in userdef_asm_bufs:
-            asm_buf.drop_unused_tags(tags.copy())
-            if do_reduce:
-                asm_buf.reduce()
-
-        ## merge main() function body into init segment
-        main_function.asm_buf.replace_instruction('RET', 'HALT')
-        init_asm_buf.extend(main_function.asm_buf)
-        all_asm_bufs = [init_asm_buf] + userdef_asm_bufs[1:] + astcc.em_instrs.asm_bufs()
-
-        ## bind VM tags and variables
-        tag_base = 0                    ## int, current AsmBuffer's tag label offset
-        tag_count = 0                   ## int, total number of tags
-        global_asm_vars = dict()        ## dict(AsmVar asm_var: any), ordered set of global variables
-        local_asm_vars = dict()         ## dict(AsmVar asm_var: any), ordered set of local variables
-        for asm_buf in all_asm_bufs:
-            n_tags = asm_buf.bind_tags(tag_base)
-            tag_count += n_tags
-            tag_base = ((tag_base + n_tags + 10) // 10) * 10
-            asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
-        all_asm_vars = list(global_asm_vars.keys()) + list(local_asm_vars.keys())
-        var_count = 1 + len(ARG_REGS)   ## int, total number of variables
-        for asm_var in all_asm_vars:
-            asm_var.bind(var_count)
-            var_count += 1
-
-        return PccResult(c_sources, var_count, tag_count, all_asm_bufs, all_asm_vars)
 
 ## ---------------------------------------------------------------------------
 
@@ -1329,34 +1217,164 @@ class CSourceBundle:
     def line_at(self, filename, row):
         return self.c_source_files[filename][row-1]
 
-def pcc(filenames, debug=False, do_reduce=True):
-    cc = Pcc()
-    cc_result = cc.compile(filenames, debug=debug, do_reduce=do_reduce)
-    if cc_result is None:
-        print('*** aborted with compiler error(s)', file=sys.stderr)
-    return cc_result
+class PccResult:
+    def __init__(self, var_count, tag_count, asm_code):
+        self.var_count = var_count
+        self.tag_count = tag_count
+        self.asm_code = asm_code
+
+def pcc(filenames, use_cis=True, do_reduce=True, use_comments=False, debug=False):
+    ## build C translation unit from input files
+    if 'vm_api.h' not in [PurePath(filename).name for filename in filenames]:
+        filenames = [str(Path(__file__).resolve().with_name('vm_api.h'))] + filenames
+    c_sources = CSourceBundle()
+    c_translation_unit = c_sources.read_files(filenames)
+    if c_translation_unit is None:
+        return None
+    log = PccLogger(c_sources, debug)
+
+    ## build abstract syntax tree (AST) from C translation unit
+    try:
+        ast = CParser().parse(c_translation_unit)
+    except ParseError as e:
+        m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
+        if m is None:
+            print(e, file=sys.stderr)
+        else:
+            flat_row, col, message = int(m[1]), int(m[2]), m[3]
+            log.error_msg(flat_row, col, message)
+        print('*** aborted with parser error', file=sys.stderr)
+        return None
+
+    ## transform AST into intermediate representation
+    astcc = AstCompiler(log, c_sources, use_cis=use_cis)
+    if astcc.compile(ast) != 0:
+        return None
+    init_asm_buf, functions = astcc.init_asm_buf, astcc.functions
+
+    ## collect main and user-defined functions
+    main_function = None
+    userdef_functions = []
+    for func_name, function in functions.items():
+        if isinstance(function, UserDefFunction):
+            if func_name == 'main':
+                main_function = function
+            else:
+                userdef_functions.append(function)
+
+    ## incrementally drop non-called functions
+    while len(userdef_functions) > 0:
+        functions_passed = []
+        func_names_dropped = set()
+        for function in userdef_functions:
+            if len(function.caller) > 0:
+                functions_passed.append(function)
+            else:
+                func_names_dropped.add(function.func_name)
+        if len(func_names_dropped) == 0:
+            break
+        for function in functions_passed:
+            function.caller -= func_names_dropped
+        userdef_functions = functions_passed
+        if use_cis:
+            astcc.em_instrs.drop_caller(func_names_dropped)
+
+    ## check main and user-defined function definitions
+    for function in userdef_functions:
+        if function.impl_node is None:
+            log.error(PccError(function.decl_node,
+                f'missing "{function.func_name}()" function implementation'))
+    if main_function is None or main_function.impl_node is None:
+        log.error(PccError(None, 'missing "main()" function implementation'))
+
+    if log.error_count != 0:
+        return None
+
+    ## drop unused tags in main and user-defined functions
+    tags = {}   ## dict(AsmTag asm_tag: int use_count), preseed w. user-defined functions
+    for function in userdef_functions:
+        tags[function.asm_tag] = 1
+    userdef_asm_bufs = [main_function.asm_buf] + [f.asm_buf for f in userdef_functions]
+    for asm_buf in userdef_asm_bufs:
+        asm_buf.drop_unused_tags(tags.copy())
+        if do_reduce:
+            asm_buf.reduce()
+
+    ## merge main() function body into init segment
+    main_function.asm_buf.replace_instruction('RET', 'HALT')
+    init_asm_buf.extend(main_function.asm_buf)
+    all_asm_bufs = [init_asm_buf] + userdef_asm_bufs[1:]
+    if use_cis:
+        all_asm_bufs += astcc.em_instrs.asm_bufs()
+
+    ## bind VM tags and variables
+    tag_base = 0                    ## int, current AsmBuffer's tag label offset
+    tag_count = 0                   ## int, total number of tags
+    global_asm_vars = dict()        ## dict(AsmVar asm_var: any), ordered set of global variables
+    local_asm_vars = dict()         ## dict(AsmVar asm_var: any), ordered set of local variables
+    for asm_buf in all_asm_bufs:
+        n_tags = asm_buf.bind_tags(tag_base)
+        tag_count += n_tags
+        tag_base = ((tag_base + n_tags + 10) // 10) * 10
+        asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
+    all_asm_vars = list(global_asm_vars.keys()) + list(local_asm_vars.keys())
+    var_count = 1 + len(ARG_REGS)   ## int, total number of variables
+    for asm_var in all_asm_vars:
+        asm_var.bind(var_count)
+        var_count += 1
+
+    ## transform intermediate representation into assembly code
+    asm_code = []
+    if use_comments:
+        asm_code.append('; VM variables:')
+        asm_code.append(';')
+        asm_code.append(';  v0: reserved: SCR0')
+        asm_code.append(';  v1: reserved: ARG0')
+        asm_code.append(';  v2: reserved: ARG1')
+        asm_code.append(';  v3: reserved: ARG2')
+        for asm_var in all_asm_vars:
+            var_sym = asm_var.var_sym
+            coord = var_sym.decl_node.coord
+            filename, row = c_sources.map_coord(coord.line)
+            fqname = var_sym.cname
+            if var_sym.context_function is not None:
+                fqname = f'{var_sym.context_function.func_name}.{fqname}'
+            asm_code.append(f'; {asm_var!s: >3}: '
+                   f'{PurePath(filename).name}:{row}:{coord.column}: '
+                   f'{var_sym.ctype} {fqname}')
+    for asm_buf in all_asm_bufs:
+        if len(asm_code) > 0:
+            asm_code.append('')
+        asm_buf.format_statements_to(asm_code, use_comments)
+
+    return PccResult(var_count, tag_count, '\n'.join(asm_code))
+
+## ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description='pcc - PIGS C compiler')
     parser.add_argument('filenames', metavar='C_FILE', nargs='+', help='filenames to parse')
+    parser.add_argument('-e', dest='use_cis', action='store_false', help='use extended instruction set')
+    parser.add_argument('-n', dest='do_reduce', action='store_false', help='do not reduce asm output')
     parser.add_argument('-o', dest='out_filename', metavar='FILE', help='place the output into FILE ("-" for STDOUT)')
-    parser.add_argument('-c', dest='comments', action='store_true', help='add comments to asm output')
-    parser.add_argument('-n', dest='no_reduce', action='store_true', help='do not reduce asm output')
+    parser.add_argument('-c', dest='use_comments', action='store_true', help='add comments to asm output')
     parser.add_argument('-d', dest='debug', action='store_true', help='add debug output to error messages')
     args = parser.parse_args()
 
-    cc = pcc(args.filenames, debug=args.debug, do_reduce=not args.no_reduce)
-    if cc is None:
+    cc_result = pcc(args.filenames, use_cis=args.use_cis, do_reduce=args.do_reduce,
+        use_comments=args.use_comments, debug=args.debug)
+    if cc_result is None:
         return -1
+
     out_filename = args.out_filename
     if out_filename is None:
         out_filename = PurePath(args.filenames[-1]).stem + '.s'
     if out_filename == '-':
-        cc.encode_asm(use_comments=args.comments, file=sys.stdout)
+        print(cc_result.asm_code, file=sys.stdout)
     else:
         with open(out_filename, 'w') as f:
-            cc.encode_asm(use_comments=args.comments, file=f)
-    print(f'\nVM variables used: {cc.var_count}/150, tags: {cc.tag_count}/50.', file=sys.stderr)
+            print(cc_result.asm_code, file=f)
+    print(f'\nVM variables used: {cc_result.var_count}/150, tags: {cc_result.tag_count}/50.', file=sys.stderr)
     return 0
 
 if __name__ == "__main__":
