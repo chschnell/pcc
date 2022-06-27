@@ -191,15 +191,13 @@ class AsmBuffer:
                             global_asm_vars[asm_var] = True
                         else:
                             local_asm_vars[asm_var] = True
-        
-    def format_statements(self, use_comments):
-        asm_lines = []
+
+    def format_statements_to(self, out_buffer, use_comments):
         for asm_stmt in self.stmt_buf:
             asm_line = asm_stmt.format_statement()
             if use_comments and asm_stmt.comment is not None:
                 asm_line = f'{asm_line: <24}; {asm_stmt.comment}'
-            asm_lines.append(asm_line)
-        return asm_lines
+            out_buffer.append(asm_line)
 
 ## ---------------------------------------------------------------------------
 
@@ -885,7 +883,7 @@ class AstCompiler:
         if rhs_term is not None:
             if self.em_instrs.is_emulated(op_instr):
                 self.asm_out('LD', SCR0, rhs_term)
-                self.em_instrs.compile(self, op_instr) ## A := A <OP> A; F := undef
+                self.em_instrs.compile(self, op_instr) ## A := A <OP> x; F := undef
             else:
                 self.asm_out(op_instr, rhs_term)    ## A := A <OP> x, F := A
         else:
@@ -894,7 +892,7 @@ class AstCompiler:
             self.asm_out('STA', SCR0)               ## SCR0 := A
             self.asm_out('POPA')                    ## restore lhs in ACC from stack
             if self.em_instrs.is_emulated(op_instr):
-                self.em_instrs.compile(self, op_instr) ## A := A <OP> A; F := undef
+                self.em_instrs.compile(self, op_instr) ## A := A <OP> SCR0; F := undef
             else:
                 self.asm_out(op_instr, SCR0)        ## A := A <OP> SCR0, F := A
         return False
@@ -1159,20 +1157,71 @@ class AstCompiler:
 
 ## ---------------------------------------------------------------------------
 
-class Pcc:
-    def __init__(self, log, c_sources):
-        self.log = log                      ## PccLogger, log sink
-        self.c_sources = c_sources          ## CSourceBundle, C sources to compile
-        self.var_count = None               ## int, number of VM variables allocated
-        self.tag_count = None               ## int, number of VM tags allocated
-        self.all_asm_bufs = None            ## list(AsmBuf asm_buf, ...), list of all buffers
-        self.all_asm_vars = None            ## list(AsmVar asm_var, ...), list of all variables
+class PccResult:
+    def __init__(self, c_sources, var_count, tag_count, all_asm_bufs, all_asm_vars):
+        self.c_sources = c_sources
+        self.var_count = var_count
+        self.tag_count = tag_count
+        self.all_asm_bufs = all_asm_bufs
+        self.all_asm_vars = all_asm_vars
 
-    def compile(self, ast_root_node, do_reduce=True):
+    def encode_asm(self, use_comments=False, file=None):
+        ## compile intermediate representation into assembly language
+        asm_lines = []
+        if use_comments:
+            asm_lines.append('; VM variables:')
+            asm_lines.append(';')
+            asm_lines.append(';  v0: reserved: SCR0')
+            asm_lines.append(';  v1: reserved: ARG0')
+            asm_lines.append(';  v2: reserved: ARG1')
+            asm_lines.append(';  v3: reserved: ARG2')
+            for asm_var in self.all_asm_vars:
+                var_sym = asm_var.var_sym
+                coord = var_sym.decl_node.coord
+                filename, row = self.c_sources.map_coord(coord.line)
+                fqname = var_sym.cname
+                if var_sym.context_function is not None:
+                    fqname = f'{var_sym.context_function.func_name}.{fqname}'
+                asm_lines.append(f'; {asm_var!s: >3}: '
+                       f'{PurePath(filename).name}:{row}:{coord.column}: '
+                       f'{var_sym.ctype} {fqname}')
+        for asm_buf in self.all_asm_bufs:
+            if len(asm_lines) > 0:
+                asm_lines.append('')
+            asm_buf.format_statements_to(asm_lines, use_comments)
+        result = '\n'.join(asm_lines)
+        if file is not None:
+            print(result, file=file)
+        return result
+
+class Pcc:
+    def compile(self, filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
+        ## build C translation unit from input files
+        if vm_api_h not in [PurePath(filename).name for filename in filenames]:
+            filenames = [vm_api_h] + filenames
+        c_sources = CSourceBundle()
+        c_translation_unit = c_sources.read_files(filenames)
+        if c_translation_unit is None:
+            return None
+        log = PccLogger(c_sources, debug)
+
+        ## build abstract syntax tree (AST) from C translation unit
+        try:
+            ast = CParser().parse(c_translation_unit)
+        except ParseError as e:
+            m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
+            if m is None:
+                print(e, file=sys.stderr)
+            else:
+                flat_row, col, message = int(m[1]), int(m[2]), m[3]
+                log.error_msg(flat_row, col, message)
+            print('*** aborted with parser error', file=sys.stderr)
+            return None
+
         ## compile AST into intermediate representation
-        astcc = AstCompiler(self.log, self.c_sources)
-        if astcc.compile(ast_root_node) != 0:
-            return self.log.error_count
+        astcc = AstCompiler(log, c_sources)
+        if astcc.compile(ast) != 0:
+            return None
         init_asm_buf, functions = astcc.init_asm_buf, astcc.functions
 
         ## collect main and user-defined functions
@@ -1204,13 +1253,13 @@ class Pcc:
         ## check main and user-defined function definitions
         for function in userdef_functions:
             if function.impl_node is None:
-                self.log.error(PccError(function.decl_node,
+                log.error(PccError(function.decl_node,
                     f'missing "{function.func_name}()" function implementation'))
         if main_function is None or main_function.impl_node is None:
-            self.log.error(PccError(None, 'missing "main()" function implementation'))
+            log.error(PccError(None, 'missing "main()" function implementation'))
 
-        if self.log.error_count != 0:
-            return self.log.error_count
+        if log.error_count != 0:
+            return None
 
         ## drop unused tags in main and user-defined functions
         tags = {}   ## dict(AsmTag asm_tag: int use_count), preseed w. user-defined functions
@@ -1227,59 +1276,23 @@ class Pcc:
         init_asm_buf.extend(main_function.asm_buf)
         all_asm_bufs = [init_asm_buf] + userdef_asm_bufs[1:] + astcc.em_instrs.asm_bufs()
 
-        ## bind VM tags
-        tag_count = 0
-        tag_base = 0
+        ## bind VM tags and variables
+        tag_base = 0                    ## int, current AsmBuffer's tag label offset
+        tag_count = 0                   ## int, total number of tags
+        global_asm_vars = dict()        ## dict(AsmVar asm_var: any), ordered set of global variables
+        local_asm_vars = dict()         ## dict(AsmVar asm_var: any), ordered set of local variables
         for asm_buf in all_asm_bufs:
             n_tags = asm_buf.bind_tags(tag_base)
             tag_count += n_tags
             tag_base = ((tag_base + n_tags + 10) // 10) * 10
-
-        ## bind VM variables
-        global_asm_vars = dict()    ## dict(AsmVar asm_var: any)
-        local_asm_vars = dict()     ## dict(AsmVar asm_var: any)
-        for asm_buf in all_asm_bufs:
             asm_buf.collect_vm_variables(global_asm_vars, local_asm_vars)
         all_asm_vars = list(global_asm_vars.keys()) + list(local_asm_vars.keys())
-        var_count = 1 + len(ARG_REGS)
+        var_count = 1 + len(ARG_REGS)   ## int, total number of variables
         for asm_var in all_asm_vars:
             asm_var.bind(var_count)
             var_count += 1
 
-        ## store results
-        self.var_count = var_count
-        self.tag_count = tag_count
-        self.all_asm_bufs = all_asm_bufs
-        self.all_asm_vars = all_asm_vars
-        return self.log.error_count
-
-    def encode_asm(self, use_comments=False, file=None):
-        asm_lines = []
-        if use_comments:
-            asm_lines.append('; VM variables:')
-            asm_lines.append(';')
-            asm_lines.append(';  v0: reserved: SCR0')
-            asm_lines.append(';  v1: reserved: ARG0')
-            asm_lines.append(';  v2: reserved: ARG1')
-            asm_lines.append(';  v3: reserved: ARG2')
-            for asm_var in self.all_asm_vars:
-                var_sym = asm_var.var_sym
-                coord = var_sym.decl_node.coord
-                filename, row = self.c_sources.map_coord(coord.line)
-                fqname = var_sym.cname
-                if var_sym.context_function is not None:
-                    fqname = f'{var_sym.context_function.func_name}.{fqname}'
-                asm_lines.append(f'; {asm_var!s: >3}: '
-                       f'{PurePath(filename).name}:{row}:{coord.column}: '
-                       f'{var_sym.ctype} {fqname}')
-        for i_buf, asm_buf in enumerate(self.all_asm_bufs):
-            if len(asm_lines) > 0:
-                asm_lines.append('')
-            asm_lines.extend(asm_buf.format_statements(use_comments))
-        result = '\n'.join(asm_lines)
-        if file is not None:
-            print(result, file=file)
-        return result
+        return PccResult(c_sources, var_count, tag_count, all_asm_bufs, all_asm_vars)
 
 ## ---------------------------------------------------------------------------
 
@@ -1316,33 +1329,12 @@ class CSourceBundle:
     def line_at(self, filename, row):
         return self.c_source_files[filename][row-1]
 
-def pcc(filenames, debug=False, do_reduce=True, vm_api_h='vm_api.h'):
-    if vm_api_h not in [PurePath(filename).name for filename in filenames]:
-        filenames = [vm_api_h] + filenames
-    ## build C translation unit from input files
-    c_sources = CSourceBundle()
-    c_translation_unit = c_sources.read_files(filenames)
-    if c_translation_unit is None:
-        return None
-    log = PccLogger(c_sources, debug)
-    ## build abstract syntax tree (AST) from C translation unit
-    try:
-        ast = CParser().parse(c_translation_unit)
-    except ParseError as e:
-        m = re.fullmatch('[^:]*?:(\d+):(\d+):\s*(.*)', str(e))
-        if m is None:
-            print(e, file=sys.stderr)
-        else:
-            flat_row, col, message = int(m[1]), int(m[2]), m[3]
-            log.error_msg(flat_row, col, message)
-        print('*** aborted with parser error', file=sys.stderr)
-        return None
-    ## compile AST into assembly language
-    cc = Pcc(log, c_sources)
-    if cc.compile(ast, do_reduce=do_reduce) != 0:
+def pcc(filenames, debug=False, do_reduce=True):
+    cc = Pcc()
+    cc_result = cc.compile(filenames, debug=debug, do_reduce=do_reduce)
+    if cc_result is None:
         print('*** aborted with compiler error(s)', file=sys.stderr)
-        return None
-    return cc
+    return cc_result
 
 def main():
     parser = argparse.ArgumentParser(description='pcc - PIGS C compiler')
