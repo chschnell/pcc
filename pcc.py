@@ -570,6 +570,8 @@ class FunctionSymbol(AbstractSymbol):
 ## ---------------------------------------------------------------------------
 
 class PccLogger:
+    NON_WHITESPACE_PATTERN = re.compile(r'[^\t ]')
+
     def __init__(self, c_sources, debug, file=sys.stderr):
         self.c_sources = c_sources      ## CSourceBundle, C sources to compile
         self.debug = debug              ## bool, True: show extra debug output
@@ -610,7 +612,7 @@ class PccLogger:
                     self.e_location = e_location
                     error_msg = f'{filename}: In function "{ctx_func_name}":\n'
             src_line = self.c_sources.line_at(filename, row)
-            pointer_indent = re.sub(r'[^\t ]', ' ', src_line[:col-1])
+            pointer_indent = self.NON_WHITESPACE_PATTERN.sub(src_line[:col-1])
             error_msg += f'{filename}:{row}:{col}: {message}\n{src_line}\n{pointer_indent}^^^'
         print(error_msg, file=self.file)
 
@@ -642,6 +644,8 @@ class AstCompiler:
         '>=': 'GE',                         ## A=(A >= x); F=undef/A (CIS/EIS); A:(0|1)
         '<':  'LT',                         ## A=(A <  x); F=undef/A (CIS/EIS); A:(0|1)
         '<=': 'LE' }                        ## A=(A <= x); F=undef/A (CIS/EIS); A:(0|1)
+
+    PARAM_PATTERN = re.compile(r'(?:.*_)?(p[0-9])(?:_.*)?')
 
     def __init__(self, log, c_sources, use_cis=True):
         self.log = log                      ## PccLogger, log sink
@@ -714,7 +718,7 @@ class AstCompiler:
         return self.bind_symbol(node, VmVariableSymbol(ctype, cname, asm_var, node, self.context_function))
 
     def declare_parameter(self, node, ctype, cname):
-        m = re.fullmatch(r'(?:.*_)?(p[0-9])(?:_.*)?', cname)
+        m = self.PARAM_PATTERN.fullmatch(cname)
         if not m:
             raise PccError(node, 'external variable names must contain one of "p0", "p1", ..., "p9"')
         vm_param_name = m.groups(0)[0]
