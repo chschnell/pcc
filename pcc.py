@@ -114,11 +114,6 @@ class AsmBuffer:
             if isinstance(asm_cmd, AsmCmd) and asm_cmd.instr == find_instr:
                 asm_cmd.instr = replace_instr
 
-    def _replace_tag(self, find_tag, replace_tag):
-        for asm_cmd in self.stmt_buf:
-            if isinstance(asm_cmd, AsmBranchCmd) and asm_cmd.args[0] is find_tag:
-                asm_cmd.args[0] = replace_tag
-
     def reduce(self):
         in_buf = self.stmt_buf
         out_buf = [in_buf[0]]
@@ -192,12 +187,10 @@ class AsmBuffer:
                         else:
                             local_asm_vars[asm_var] = True
 
-    def format_statements_to(self, out_buffer, use_comments):
-        for asm_stmt in self.stmt_buf:
-            asm_line = asm_stmt.format_statement()
-            if use_comments and asm_stmt.comment is not None:
-                asm_line = f'{asm_line: <24}; {asm_stmt.comment}'
-            out_buffer.append(asm_line)
+    def _replace_tag(self, find_tag, replace_tag):
+        for asm_cmd in self.stmt_buf:
+            if isinstance(asm_cmd, AsmBranchCmd) and asm_cmd.args[0] is find_tag:
+                asm_cmd.args[0] = replace_tag
 
 ## ---------------------------------------------------------------------------
 
@@ -395,6 +388,9 @@ class Function:
     def decl_str(self):
         return f'{self.prototype.ret_ctype} {self.func_name}({", ".join(self.prototype.arg_ctypes)})'
 
+    def asm_repr(self):
+        raise NotImplementedError()
+
 class UserDefFunction(Function):
     def __init__(self, decl_node, prototype):
         super().__init__(decl_node, prototype)
@@ -411,6 +407,9 @@ class UserDefFunction(Function):
         self.arg_vars = [               ## list(AsmVar), function argument VM variables
             AsmVar() for i in range(self.arg_count)]
         self.static_asm_tags = {}       ## dict(str tag_label: AsmTag asm_tag), user-defined static tags
+
+    def asm_repr(self):
+        return self.asm_tag
 
 class VmApiFunction(Function):
     VM_FUNCTION_INSTR_CIS = {
@@ -480,7 +479,7 @@ class VmApiFunction(Function):
         if use_cis:
             self.map_argument = getattr(self, f'_map_argument_cis_{self.func_name}', None)
 
-    def vm_func_instr(self):
+    def asm_repr(self):
         if self.instr is None:
             func_name = self.func_name
             if not self.use_cis and func_name in self.VM_FUNCTION_INSTR_EIS:
@@ -568,13 +567,8 @@ class FunctionSymbol(AbstractSymbol):
         super().__init__(cname)
         self.function = function
 
-class UserDefFunctionSymbol(FunctionSymbol):
-    def asm_repr(self):                 ## AsmTag asm_tag, str() expands to function entry point's TAG
-        return self.function.asm_tag
-
-class VmApiFunctionSymbol(FunctionSymbol):
-    def asm_repr(self):                 ## str vm_func_instr, VM function's assembly language instruction
-        return self.function.vm_func_instr()
+    def asm_repr(self):
+        return self.function.asm_repr()
 
 ## ---------------------------------------------------------------------------
 
@@ -748,11 +742,7 @@ class AstCompiler:
         else:
             self.functions[func_name] = UserDefFunction(node, prototype)
         ## bind new symbol
-        if is_vm_function:
-            func_sym = VmApiFunctionSymbol(func_name, self.functions[func_name])
-        else:
-            func_sym = UserDefFunctionSymbol(func_name, self.functions[func_name])
-        return self.bind_symbol(node, func_sym)
+        return self.bind_symbol(node, FunctionSymbol(func_name, self.functions[func_name]))
 
     def try_parse_constant(self, node):
         result = None
@@ -1010,7 +1000,7 @@ class AstCompiler:
         return False
 
     def _compile_FuncDef_node(self, node):
-        func_sym = self.declare_function(node.decl)     ## UserDefFunctionSymbol func_sym
+        func_sym = self.declare_function(node.decl)
         function = func_sym.function
         if function.impl_node is not None:
             raise PccError(node, f'redefinition of "{function.func_name}"')
@@ -1058,7 +1048,7 @@ class AstCompiler:
         arg_count = len(node.args.exprs) if node.args is not None else 0
         if function.arg_count != arg_count:
             raise PccError(node, f'function expects {function.arg_count} argument(s) instead of {arg_count}')
-        if isinstance(func_sym, VmApiFunctionSymbol):
+        if isinstance(func_sym.function, VmApiFunction):
             ## compile call to VM API function
             asm_args = []
             for i_arg in range(function.arg_count):
@@ -1243,9 +1233,9 @@ def pcc(filenames, use_cis=True, do_reduce=True, use_comments=False, debug=False
     c_translation_unit = c_sources.read_files(filenames)
     if c_translation_unit is None:
         return None
-    log = PccLogger(c_sources, debug)
 
     ## build abstract syntax tree (AST) from C translation unit
+    log = PccLogger(c_sources, debug)
     try:
         ast = CParser().parse(c_translation_unit)
     except ParseError as e:
@@ -1262,9 +1252,9 @@ def pcc(filenames, use_cis=True, do_reduce=True, use_comments=False, debug=False
     astcc = AstCompiler(log, c_sources, use_cis=use_cis)
     if astcc.compile(ast) != 0:
         return None
-    init_asm_buf, functions = astcc.init_asm_buf, astcc.functions
 
     ## collect main and user-defined functions
+    init_asm_buf, functions = astcc.init_asm_buf, astcc.functions
     main_function = None
     userdef_functions = []
     for func_name, function in functions.items():
@@ -1357,7 +1347,11 @@ def pcc(filenames, use_cis=True, do_reduce=True, use_comments=False, debug=False
     for asm_buf in all_asm_bufs:
         if len(asm_code) > 0:
             asm_code.append('')
-        asm_buf.format_statements_to(asm_code, use_comments)
+        for asm_stmt in asm_buf.stmt_buf:
+            asm_line = asm_stmt.format_statement()
+            if use_comments and asm_stmt.comment is not None:
+                asm_line = f'{asm_line: <24}; {asm_stmt.comment}'
+            asm_code.append(asm_line)
 
     return PccResult(var_count, tag_count, '\n'.join(asm_code))
 
