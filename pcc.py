@@ -106,9 +106,6 @@ class AsmBuffer:
             asm_stmt = AsmBranchCmd(instr, list(args), comment)
         self.stmt_buf.append(asm_stmt)
 
-    def extend(self, asm_buffer):
-        self.stmt_buf.extend(asm_buffer.stmt_buf)
-
     def replace_instruction(self, find_instr, replace_instr):
         for asm_cmd in self.stmt_buf:
             if isinstance(asm_cmd, AsmCmd) and asm_cmd.instr == find_instr:
@@ -568,7 +565,7 @@ class FunctionSymbol(AbstractSymbol):
         self.function = function
 
     def asm_repr(self):
-        return self.function.asm_repr()
+        return self.function.asm_repr() ## AsmTag asm_tag (user-defined function) or str asm_instr (VM API function)
 
 ## ---------------------------------------------------------------------------
 
@@ -1304,7 +1301,7 @@ def pcc(filenames, use_cis=True, do_reduce=True, use_comments=False, debug=False
 
     ## merge main() function body into init segment
     main_function.asm_buf.replace_instruction('RET', 'HALT')
-    init_asm_buf.extend(main_function.asm_buf)
+    init_asm_buf.stmt_buf.extend(main_function.asm_buf.stmt_buf)
     all_asm_bufs = [init_asm_buf] + userdef_asm_bufs[1:]
     if use_cis:
         all_asm_bufs += astcc.em_instrs.asm_bufs()
