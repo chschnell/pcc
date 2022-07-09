@@ -159,12 +159,9 @@ class AsmBuffer:
                     tag_use_count[asm_tag] = 1
                 else:
                     tag_use_count[asm_tag] += 1
-        out_buf = []
-        for asm_stmt in self.stmt_buf:
-            if isinstance(asm_stmt, AsmTag) and tag_use_count[asm_stmt] == 0:
-                continue    ## drop TAG-commands of tags that are not used in any branch-command
-            out_buf.append(asm_stmt)
-        self.stmt_buf = out_buf
+        ## drop TAG-commands of tags that are not used in any branch-command
+        self.stmt_buf = [asm_stmt for asm_stmt in self.stmt_buf
+            if not isinstance(asm_stmt, AsmTag) or tag_use_count[asm_stmt] != 0]
 
     def bind_tags(self, tag_id_offset):
         tag_counter = 0
@@ -1039,42 +1036,37 @@ class AstCompiler:
         func_name = node.name.name
         if func_name == 'asm':
             return self.compile_asm_statement(node)
-        returned = False
         func_sym = self.find_symbol(func_name, filter=FunctionSymbol)
         if func_sym is None:
             raise PccError(node, f'undeclared function "{func_name}"')
         function = func_sym.function
         if self.in_expression and not function.has_return:
             raise PccError(node, 'function declared without return value')
-        arg_count = len(node.args.exprs) if node.args is not None else 0
-        if function.arg_count != arg_count:
-            raise PccError(node, f'function expects {function.arg_count} argument(s) instead of {arg_count}')
-        if isinstance(func_sym.function, VmApiFunction):
-            ## compile call to VM API function
+        arg_exprs = node.args.exprs if node.args is not None else []
+        if function.arg_count != len(arg_exprs):
+            raise PccError(node, f'function expects {function.arg_count} argument(s) instead of {len(arg_exprs)}')
+        returned = False
+        if isinstance(function, VmApiFunction):                                     ## compile call to VM API function
             asm_args = []
-            for i_arg in range(function.arg_count):
-                arg_expr_node = node.args.exprs[i_arg]
+            for i_arg, arg_expr_node in enumerate(arg_exprs):
                 arg_term = None
                 if self.use_cis and function.map_argument is not None:
                     arg_term = function.map_argument(arg_expr_node, i_arg, self.try_parse_constant(arg_expr_node))
                 if arg_term is None:
                     arg_term = self.try_parse_term(arg_expr_node)
-                if arg_term is None:
-                    arg_term = ARG_REGS[i_arg]
-                    self.compile_assignment(arg_term, arg_expr_node)
+                    if arg_term is None:
+                        arg_term = ARG_REGS[i_arg]
+                        self.compile_assignment(arg_term, arg_expr_node)
                 asm_args.append(arg_term)
             asm_instr = func_sym.asm_repr()
+            self.asm_out(asm_instr, *asm_args, comment=f'{func_name}();')           ## A := vm_api_func(); F := A
             if asm_instr == 'HALT':
                 returned = True
-            self.asm_out(asm_instr, *asm_args, comment=f'{func_name}();')           ## A := vm_api_func(); F := A
-        else:
-            ## compile call to user defined function
+        else:                                                                       ## compile call to user defined function
             if function is not self.context_function:
                 function.caller.add(self.context_function.func_name)
-            for i_arg in range(function.arg_count):
-                arg_expr_node = node.args.exprs[i_arg]
-                arg_asm_var = function.arg_vars[i_arg]
-                self.compile_assignment(arg_asm_var, arg_expr_node)
+            for i_arg, arg_expr_node in enumerate(arg_exprs):
+                self.compile_assignment(function.arg_vars[i_arg], arg_expr_node)
             self.asm_out('CALL', func_sym.asm_repr(), comment=f'{func_name}();')    ## A := user_func(); F := undef/A (CIS/EIS)
         return returned
 
